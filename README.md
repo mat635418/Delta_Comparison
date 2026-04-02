@@ -1,50 +1,53 @@
-# 📊 Order Rescheduling Dashboard
+# Order Rescheduling Dashboard
 
 A **Streamlit** web application for the comparative analysis of order-rescheduling activity between **February 2026** and **March 2026**, segmented by tyre rim size.
 
 ---
 
-## ✨ Features
+## Features
 
 | Feature | Description |
 |---|---|
 | **File Loading** | Upload custom CSV files *or* click one button to load the default files from the repo root |
-| **Executive Overview** | Top-level KPIs (total changes, MoM delta, most active rim) and side-by-side rim comparison |
-| **February Analysis** | Full breakdown for February: changes by rim, daily trend, top countries, top customers, postponement distribution, order-size buckets |
-| **March Analysis** | Identical deep-dive for March, enabling easy in-tab inspection |
-| **Feb vs March Comparison** | Grouped bar charts, month-over-month delta (absolute & %), country shift, postponement shift, overlaid daily trend |
-| **Rim Deep-Dive** | Pick any rim size and instantly see February vs March side by side — daily trends, top countries, top customers, postponement pie, order-size buckets, raw data explorer |
+| **Feb vs March** | Grouped bar charts, MoM delta (absolute & %), postponement shift, overlaid daily trend |
+| **Earlier vs Later Date** | Per-rim breakdown of pull-in vs push-out changes, 100% split bars, delta-shift chart Feb→Mar |
+| **Change Intervals** | Quantity-group pivot (Less than 5 / 1-10 / 11-50 / 51-1000 / 101-200 / 201+) by rim, Feb vs Mar + heatmap |
 | **Global Rim Filter** | Sidebar multi-select narrows every chart to the rims you care about |
 
 ---
 
-## 🗂️ Expected Data Format
+## Expected Data Format
 
-Both files must be **semicolon-separated CSV exports** (`;` delimiter) from the pivot-table report. The application auto-detects the correct block and column names using a fuzzy-matching engine, so minor variations in naming are handled automatically.
+Both files must be **semicolon-separated CSV exports** (`;` delimiter) from the SAP pivot-table report.  
+The application auto-detects the correct block and column names using a fuzzy-matching engine, so minor variations in naming are handled automatically.
 
-### Recognised Columns
+### Detail block columns
 
-| Standard Name | Typical Raw Name(s) | Description |
+| Standard Name | Typical Raw Name | Description |
 |---|---|---|
 | `rim` | `Rim size` | Rim diameter in inches |
-| `n_changes` | `Number_of changes` | Number of changes on that order line |
-| `country` | `Country_Name` | Customer's country |
-| `customer` | `Customer_Name` | Customer name |
-| `qty_group` | `Grouped confirmed quantit` | Order-size bucket (e.g. "1 to 10", "11 to 50") |
-| `postponed` | `Postponed_Week` | Postponement horizon (e.g. "1 Week", "4 Weeks") |
+| `n_changes` | `_Count of Changes` | Total rescheduling changes |
+| `n_orders` | `Count of Order_Line_Number` | Distinct order lines |
+| `earlier_changes` | `_Changes on Earlier Date` | Changes pulled to an earlier week |
+| `later_changes` | `_Changes on Later Date` | Changes pushed to a later week |
 
-### Default File Names
+### Quantity-group block
 
-Place the CSV files in the **root of the repository** and name them so that the auto-detect logic can find them:
+The right-side pivot (`Grouped confirmed quantity x Rim_Diameter_Inches`) is parsed automatically — no manual mapping needed.  
+Groups recognised: **Less than 5 / 1 to 10 / 11 to 50 / 51 to 1000 / 101 to 200 / 201+**
+
+### Default file names
+
+Place the CSV files in the **root of the repository**:
 
 ```
-Feb.csv   ← any file whose name contains "feb" (case-insensitive)
-Mar.csv   ← any file whose name contains "mar" (case-insensitive)
+Feb.csv   <- any file whose name contains "feb" (case-insensitive)
+Mar.csv   <- any file whose name contains "mar" (case-insensitive)
 ```
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### 1. Clone the repository
 
@@ -57,8 +60,8 @@ cd Delta_Comparison
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate      # macOS / Linux
-.venv\Scripts\activate.bat     # Windows
+source .venv/bin/activate       # macOS / Linux
+.venv\Scripts\activate.bat      # Windows
 ```
 
 ### 3. Install dependencies
@@ -67,41 +70,31 @@ source .venv/bin/activate      # macOS / Linux
 pip install -r requirements.txt
 ```
 
-### 4. Add your data files *(optional)*
-
-Copy your February and March CSV files to the repo root:
-
-```
-Delta_Comparison/
-├── app.py
-├── requirements.txt
-├── README.md
-├── Feb.csv   ← place here
-└── Mar.csv   ← place here
-```
-
-### 5. Launch the app
+### 4. Launch the app
 
 ```bash
 streamlit run app.py
 ```
 
-The dashboard will open automatically in your default browser at `http://localhost:8501`.
+The dashboard opens automatically at `http://localhost:8501`.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 Delta_Comparison/
 ├── app.py            # Main Streamlit application
 ├── requirements.txt  # Python dependencies
+├── .gitignore        # Standard Python / Streamlit ignores
+├── Feb.csv           # February 2026 pivot-table export
+├── Mar.csv           # March 2026 pivot-table export
 └── README.md         # This file
 ```
 
 ---
 
-## 🖥️ Application Walkthrough
+## Application Walkthrough
 
 ### Sidebar
 
@@ -109,51 +102,47 @@ Delta_Comparison/
 - **Upload February / March File** — drag and drop any `.csv` file to override the default.
 - **Rim Sizes filter** — multi-select list that narrows every chart and metric to the selected rim sizes.
 
-### Tabs
+### Tab 1 — Feb vs March
 
-#### 🏠 Overview
-High-level KPIs comparing both months at a glance. A grouped bar chart shows every rim size side-by-side, and an expandable table lists the full delta breakdown.
+High-level comparison:
 
-#### 📅 February / 📅 March
-Each month gets its own dedicated tab with:
-- **KPI row** — total changes, active rim sizes, countries, customers, and date range.
-- **Changes by rim** — bar chart with value labels.
-- **Daily trend** — line chart showing volume day by day.
-- **Top countries** — horizontal bar chart.
-- **Postponement distribution** — donut chart.
-- **Top customers** — horizontal bar chart.
-- **Order-size buckets** — bar chart by confirmed-quantity group.
-- **Top sales organisations** — horizontal bar chart (when column is present).
-
-#### ⚖️ Feb vs March
-Side-by-side and delta views:
-- Grouped bar (volume) + delta-bar (%) by rim.
-- Country comparison grouped bar.
-- Postponement duration shift.
+- Grouped bar chart (volume by rim) + MoM delta bar (%).
+- Postponement duration shift grouped bar.
 - Overlaid daily trend lines.
-- Expandable comparison tables for deeper inspection.
+- Expandable comparison table.
 
-#### 🔍 Rim Deep-Dive
-Select any rim diameter from a drop-down. The tab instantly renders:
-- KPI row (Feb total, Mar total, absolute delta + %).
-- Overlaid daily trend for both months.
-- Top countries, top customers, postponement donut — all shown for **Feb** and **Mar** in parallel columns.
-- Order-size bucket bar charts.
-- Raw data explorer (expandable).
+### Tab 2 — Earlier vs Later Date
+
+Analyses the *direction* of rescheduling per rim:
+
+- **Grouped bar** — Earlier vs Later change volume for each month.
+- **100% stacked bar** — percentage split (Earlier / Later) per rim, for each month.
+- **Feb vs Mar comparison** — side-by-side charts for earlier and later changes.
+- **Delta Earlier % chart** — how much the pull-in share shifted from Feb to Mar per rim (green = more pull-ins, red = more push-outs).
+- Full summary table (expandable).
+
+### Tab 3 — Change Intervals
+
+Breaks down changes by confirmed-quantity group across rim sizes:
+
+- **Stacked bar** (colour = qty group) by rim, for each month.
+- **Per-group grouped bars** — Feb vs Mar for each quantity bucket in a 2-column grid.
+- **Heatmap** — delta count (Mar minus Feb) per qty group x rim, diverging colour scale.
+- Full pivot table (expandable).
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Library | Purpose |
 |---|---|
 | [Streamlit](https://streamlit.io) | Web application framework |
-| [Pandas](https://pandas.pydata.org) | Data loading & transformation |
+| [Pandas](https://pandas.pydata.org) | Data loading and transformation |
 | [Plotly](https://plotly.com/python/) | Interactive charts |
 | [NumPy](https://numpy.org) | Numerical helpers |
 
 ---
 
-## 📄 License
+## License
 
-This project is for internal analytical use. All data processed by this application is handled locally and is never transmitted externally.
+This project is for internal analytical use. All data is processed locally and never transmitted externally.

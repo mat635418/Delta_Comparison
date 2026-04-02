@@ -91,6 +91,12 @@ POSTPONE_ORDER = [
     "6 Weeks", "7 Weeks", "8 Weeks",
 ]
 
+QTY_GROUP_ORDER = [
+    # Groups are defined by the SAP pivot-table export; "51 to 1000" and
+    # "101 to 200" are separate source segments — not derived here.
+    "Less than 5", "1 to 10", "11 to 50", "51 to 1000", "101 to 200", "201+",
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -149,8 +155,68 @@ def find_default_file(patterns: list[str]) -> tuple[bytes, str] | None:
     return None
 
 
+def _parse_qty_group(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Extract the quantity-group × rim pivot from the right-side block of the
+    raw CSV.  The block header row contains "Grouped confirmed quantity" in some
+    column; immediately to its right are "Rim_Diameter_Inches" and "Total".
+    Subsequent rows carry qty_group (fill-down when blank), rim, and count.
+    """
+    _EMPTY_L = ("", "nan", "none")
+
+    hdr_row: int | None = None
+    hdr_col: int | None = None
+    for i, row in raw.iterrows():
+        for j in range(len(row)):
+            if "grouped confirmed quantit" in str(row.iloc[j]).strip().lower():
+                hdr_row, hdr_col = i, j
+                break
+        if hdr_row is not None:
+            break
+
+    if hdr_row is None or hdr_col is None:
+        return pd.DataFrame(columns=["qty_group", "rim", "total"])
+
+    rim_col = hdr_col + 1
+    tot_col = hdr_col + 2
+
+    rows: list[dict] = []
+    current_group: str | None = None
+    for i in range(hdr_row + 1, len(raw)):
+        row = raw.iloc[i]
+        q = str(row.iloc[hdr_col]).strip() if hdr_col < len(row) else ""
+        r_str = str(row.iloc[rim_col]).strip() if rim_col < len(row) else ""
+        t_str = str(row.iloc[tot_col]).strip() if tot_col < len(row) else ""
+
+        if q.lower() == "grand total":
+            break
+        if q and q.lower() not in _EMPTY_L:
+            current_group = q
+        if current_group is None:
+            continue
+
+        try:
+            rim = float(r_str)
+        except (ValueError, TypeError):
+            continue
+        try:
+            total = float(t_str.replace(",", "."))
+        except (ValueError, TypeError):
+            continue
+
+        rows.append({"qty_group": current_group, "rim": rim, "total": total})
+
+    if not rows:
+        return pd.DataFrame(columns=["qty_group", "rim", "total"])
+
+    df = pd.DataFrame(rows)
+    df["rim"] = pd.to_numeric(df["rim"], errors="coerce")
+    df["total"] = pd.to_numeric(df["total"], errors="coerce")
+    return df.dropna(subset=["rim", "total"])
+
+
 @st.cache_data(show_spinner="Parsing CSV file…")
-def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
+def load_csv(content: bytes) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """
     Load a semicolon-separated pivot-table CSV export (e.g. Feb.csv / Mar.csv).
 
@@ -159,6 +225,8 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
     whose first cell is a numeric rim diameter.  We use the *last* such block
     so that if both a simple and a detailed table are present the richer one
     wins.
+
+    Returns (detail_df, qty_group_df, labels).
     """
     import io as _io
 
@@ -179,7 +247,7 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
             header_idx = i
 
     if header_idx is None:
-        return pd.DataFrame(), ["CSV"]
+        return pd.DataFrame(), pd.DataFrame(columns=["qty_group", "rim", "total"]), ["CSV"]
 
     # Build column headers; take columns up to the first empty/sentinel cell.
     # The pivot-table exports place a blank separator column immediately after
@@ -208,8 +276,10 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
             continue
         data_rows.append(row.iloc[: len(header)].tolist())
 
+    qty_df = _parse_qty_group(raw)
+
     if not data_rows:
-        return pd.DataFrame(), ["CSV"]
+        return pd.DataFrame(), qty_df, ["CSV"]
 
     df = pd.DataFrame(data_rows, columns=header)
     # Remove columns that are entirely empty or have empty/sentinel names
@@ -242,15 +312,26 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
     else:
         df["n_changes"] = 1
 
+    # Numeric coercions for earlier/later changes and order count
+    for _key in ("earlier_changes", "later_changes", "n_orders"):
+        if _key in df.columns:
+            df[_key] = (
+                df[_key]
+                .astype(str)
+                .str.strip()
+                .str.replace(",", ".", regex=False)
+                .pipe(pd.to_numeric, errors="coerce")
+            )
+
     df = df.dropna(how="all")
     # Drop any rows where rim is still NaN after coercion
     if "rim" in df.columns:
         df = df.dropna(subset=["rim"])
-    return df, ["CSV"]
+    return df, qty_df, ["CSV"]
 
 
-def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, list[str]]:
-    """Load a CSV file."""
+def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Load a CSV file, returning (detail_df, qty_group_df, labels)."""
     return load_csv(content)
 
 
@@ -595,14 +676,16 @@ if mar_upload:
 
 feb_df: pd.DataFrame | None = None
 mar_df: pd.DataFrame | None = None
+feb_qty_df: pd.DataFrame | None = None
+mar_qty_df: pd.DataFrame | None = None
 
 if feb_bytes:
     with st.spinner("Loading February file…"):
-        feb_df, _ = load_file(feb_bytes, feb_fname)
+        feb_df, feb_qty_df, _ = load_file(feb_bytes, feb_fname)
 
 if mar_bytes:
     with st.spinner("Loading March file…"):
-        mar_df, _ = load_file(mar_bytes, mar_fname)
+        mar_df, mar_qty_df, _ = load_file(mar_bytes, mar_fname)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIM FILTER (sidebar)
@@ -647,7 +730,7 @@ if feb_df is None and mar_df is None:
     )
     st.stop()
 
-tabs = st.tabs(["⚖️ Feb vs March", "🔍 Rim Deep-Dive"])
+tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals"])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 0 – FEB vs MARCH COMPARISON
@@ -795,156 +878,411 @@ with tabs[0]:
             st.plotly_chart(fig_trend, use_container_width=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 1 – RIM DEEP-DIVE
+# TAB 1 – EARLIER vs LATER DATE ANALYSIS
 # ═════════════════════════════════════════════════════════════════════════════
 with tabs[1]:
-    st.subheader("Rim Size Deep-Dive")
+    st.subheader("📅 Changes to Earlier Date vs Later Date — Analysis by Rim")
 
-    if feb_df is None and mar_df is None:
-        st.info("Please load at least one file.")
+    has_feb_el = (
+        feb_df_f is not None
+        and "earlier_changes" in feb_df_f.columns
+        and "later_changes" in feb_df_f.columns
+    )
+    has_mar_el = (
+        mar_df_f is not None
+        and "earlier_changes" in mar_df_f.columns
+        and "later_changes" in mar_df_f.columns
+    )
+
+    if not has_feb_el and not has_mar_el:
+        st.info("Please load files that contain Earlier/Later date columns.")
     else:
-        all_rims_dd: list[int] = []
-        for df_ in [feb_df, mar_df]:
-            if df_ is not None and "rim" in df_.columns:
-                all_rims_dd += df_["rim"].dropna().astype(int).unique().tolist()
-        all_rims_dd = sorted(set(all_rims_dd))
-
-        if not all_rims_dd:
-            st.warning("No rim data detected in loaded files.")
-        else:
-            chosen_rim = st.selectbox(
-                "Select Rim Size",
-                options=all_rims_dd,
-                index=all_rims_dd.index(17) if 17 in all_rims_dd else 0,
-                format_func=lambda r: f'{r}"',
-            )
-
-            feb_rim_df = (
-                feb_df[feb_df["rim"] == chosen_rim] if feb_df is not None and "rim" in feb_df.columns else None
-            )
-            mar_rim_df = (
-                mar_df[mar_df["rim"] == chosen_rim] if mar_df is not None and "rim" in mar_df.columns else None
-            )
-
-            # KPIs for this rim
-            st.markdown(f"#### Rim {chosen_rim}″ — Summary")
-            kp1, kp2, kp3, kp4 = st.columns(4)
-            feb_r_tot = int(feb_rim_df["n_changes"].sum()) if feb_rim_df is not None and len(feb_rim_df) > 0 else None
-            mar_r_tot = int(mar_rim_df["n_changes"].sum()) if mar_rim_df is not None and len(mar_rim_df) > 0 else None
-
-            if feb_r_tot is not None:
-                kp1.metric("Feb Changes", f"{feb_r_tot:,}")
-            if mar_r_tot is not None:
-                kp2.metric("Mar Changes", f"{mar_r_tot:,}")
-            if feb_r_tot and mar_r_tot:
-                d = mar_r_tot - feb_r_tot
-                kp3.metric("Δ abs", f"{d:+,}", delta=f"{d/feb_r_tot*100:+.1f}%")
-
-            st.markdown("---")
-
-            # Daily trend
-            fig_dd = go.Figure()
-            if feb_rim_df is not None and not feb_rim_df.empty and "date" in feb_rim_df.columns:
-                fd = daily_summary(feb_rim_df)
-                if not fd.empty:
-                    fig_dd.add_scatter(
-                        x=fd["date"], y=fd["n_changes"],
-                        mode="lines+markers", name="February",
-                        line=dict(color=COLOR_FEB),
-                    )
-            if mar_rim_df is not None and not mar_rim_df.empty and "date" in mar_rim_df.columns:
-                md = daily_summary(mar_rim_df)
-                if not md.empty:
-                    fig_dd.add_scatter(
-                        x=md["date"], y=md["n_changes"],
-                        mode="lines+markers", name="March",
-                        line=dict(color=COLOR_MAR),
-                    )
-            if fig_dd.data:
-                fig_dd.update_layout(
-                    title=f'Daily Changes — Rim {chosen_rim}"',
-                    xaxis_title="Date",
-                    yaxis_title="Changes",
-                    legend=dict(orientation="h"),
-                    margin=dict(t=50, b=30),
+        def _el_summary(df: pd.DataFrame) -> pd.DataFrame:
+            res = (
+                df.groupby("rim")
+                .agg(
+                    total=("n_changes", "sum"),
+                    earlier=("earlier_changes", "sum"),
+                    later=("later_changes", "sum"),
                 )
-                st.plotly_chart(fig_dd, use_container_width=True)
+                .reset_index()
+                .sort_values("rim")
+            )
+            res["earlier_pct"] = (res["earlier"] / res["total"] * 100).round(1)
+            res["later_pct"] = (res["later"] / res["total"] * 100).round(1)
+            return res
 
-            col_dd_l, col_dd_r = st.columns(2)
+        feb_el = _el_summary(feb_df_f) if has_feb_el else pd.DataFrame()
+        mar_el = _el_summary(mar_df_f) if has_mar_el else pd.DataFrame()
 
-            # Country breakdown for this rim
-            for _df, _label, _color, _col in [
-                (feb_rim_df, "February", COLOR_FEB, col_dd_l),
-                (mar_rim_df, "March", COLOR_MAR, col_dd_r),
-            ]:
-                if _df is not None and not _df.empty:
-                    with _col:
-                        st.markdown(f"**{_label}**")
-                        c_df = country_summary(_df, top_n=10)
-                        if not c_df.empty:
-                            st.plotly_chart(
-                                _hbar(
-                                    c_df, "n_changes", "country", _color,
-                                    f"Top Countries — {_label} — {chosen_rim}\""
-                                ),
-                                use_container_width=True,
-                            )
-                        cust_df = customer_summary(_df, top_n=10)
-                        if not cust_df.empty:
-                            st.plotly_chart(
-                                _hbar(
-                                    cust_df, "n_changes", "customer", _color,
-                                    f"Top Customers — {_label} — {chosen_rim}\""
-                                ),
-                                use_container_width=True,
-                            )
-                        post_df = postpone_summary(_df)
-                        if not post_df.empty:
-                            st.plotly_chart(
-                                _pie_postpone(
-                                    post_df,
-                                    f"Postponement — {_label} — {chosen_rim}\""
-                                ),
-                                use_container_width=True,
-                            )
+        # ── KPIs ─────────────────────────────────────────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+        if not feb_el.empty:
+            c1.metric("Feb — Earlier Changes", f"{feb_el['earlier'].sum():,.0f}")
+            c2.metric("Feb — Later Changes",   f"{feb_el['later'].sum():,.0f}")
+        if not mar_el.empty:
+            c3.metric("Mar — Earlier Changes", f"{mar_el['earlier'].sum():,.0f}")
+            c4.metric("Mar — Later Changes",   f"{mar_el['later'].sum():,.0f}")
 
-            # Qty group for this rim
+        st.markdown("---")
+
+        # ── Per-month grouped bar (Earlier vs Later by rim) ───────────────────
+        st.markdown("### Volume of Earlier vs Later Changes per Rim")
+        col_l, col_r = st.columns(2)
+        _PALETTE = {"earlier": "#1f77b4", "later": "#ff7f0e",
+                    "earlier_mar": "#aec7e8", "later_mar": "#ffbb78"}
+
+        for _el, _label, _ce, _cl, _col in [
+            (feb_el, "February",   COLOR_FEB,    "#aec7e8", col_l),
+            (mar_el, "March",      COLOR_MAR,    "#ffbb78", col_r),
+        ]:
+            if _el.empty:
+                continue
+            with _col:
+                fig = go.Figure()
+                fig.add_bar(
+                    x=_el["rim"], y=_el["earlier"], name="Earlier Date",
+                    marker_color=_ce,
+                    text=_el["earlier"].map(lambda v: f"{v:,.0f}"),
+                    textposition="outside",
+                )
+                fig.add_bar(
+                    x=_el["rim"], y=_el["later"], name="Later Date",
+                    marker_color=_cl,
+                    text=_el["later"].map(lambda v: f"{v:,.0f}"),
+                    textposition="outside",
+                )
+                fig.update_layout(
+                    barmode="group",
+                    title=f"Earlier vs Later Date — {_label}",
+                    xaxis_title="Rim Size (in)",
+                    yaxis_title="Number of Changes",
+                    xaxis=dict(tickmode="linear"),
+                    legend=dict(orientation="h"),
+                    margin=dict(t=50, b=40),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── 100 % stacked split (% Earlier vs % Later per rim) ───────────────
+        st.markdown("### % Split: Earlier vs Later per Rim")
+        col_p1, col_p2 = st.columns(2)
+
+        for _el, _label, _ce, _cl, _col in [
+            (feb_el, "February", COLOR_FEB, "#aec7e8", col_p1),
+            (mar_el, "March",    COLOR_MAR, "#ffbb78", col_p2),
+        ]:
+            if _el.empty:
+                continue
+            with _col:
+                fig_pct = go.Figure()
+                fig_pct.add_bar(
+                    x=_el["rim"], y=_el["earlier_pct"], name="Earlier %",
+                    marker_color=_ce,
+                    text=_el["earlier_pct"].map(lambda v: f"{v:.0f}%"),
+                    textposition="inside",
+                )
+                fig_pct.add_bar(
+                    x=_el["rim"], y=_el["later_pct"], name="Later %",
+                    marker_color=_cl,
+                    text=_el["later_pct"].map(lambda v: f"{v:.0f}%"),
+                    textposition="inside",
+                )
+                fig_pct.update_layout(
+                    barmode="stack",
+                    title=f"% Earlier vs Later — {_label}",
+                    xaxis_title="Rim Size (in)",
+                    yaxis=dict(range=[0, 100], ticksuffix="%"),
+                    xaxis=dict(tickmode="linear"),
+                    legend=dict(orientation="h"),
+                    margin=dict(t=50, b=40),
+                )
+                st.plotly_chart(fig_pct, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Feb vs Mar comparison by direction ───────────────────────────────
+        if not feb_el.empty and not mar_el.empty:
+            st.markdown("### Feb vs Mar — Earlier Changes by Rim")
+            cmp_el = pd.merge(
+                feb_el[["rim", "earlier", "later", "earlier_pct", "later_pct"]].rename(
+                    columns={"earlier": "feb_earlier", "later": "feb_later",
+                             "earlier_pct": "feb_epct", "later_pct": "feb_lpct"}
+                ),
+                mar_el[["rim", "earlier", "later", "earlier_pct", "later_pct"]].rename(
+                    columns={"earlier": "mar_earlier", "later": "mar_later",
+                             "earlier_pct": "mar_epct", "later_pct": "mar_lpct"}
+                ),
+                on="rim", how="outer",
+            ).sort_values("rim")
+
+            col_c1, col_c2 = st.columns(2)
+
+            with col_c1:
+                fig_e = go.Figure()
+                fig_e.add_bar(x=cmp_el["rim"], y=cmp_el["feb_earlier"],
+                              name="Feb", marker_color=COLOR_FEB)
+                fig_e.add_bar(x=cmp_el["rim"], y=cmp_el["mar_earlier"],
+                              name="Mar", marker_color=COLOR_MAR)
+                fig_e.update_layout(
+                    barmode="group",
+                    title="Earlier Date Changes — Feb vs Mar",
+                    xaxis_title="Rim (in)", yaxis_title="Changes",
+                    xaxis=dict(tickmode="linear"),
+                    legend=dict(orientation="h"), margin=dict(t=50, b=30),
+                )
+                st.plotly_chart(fig_e, use_container_width=True)
+
+            with col_c2:
+                fig_l = go.Figure()
+                fig_l.add_bar(x=cmp_el["rim"], y=cmp_el["feb_later"],
+                              name="Feb", marker_color=COLOR_FEB)
+                fig_l.add_bar(x=cmp_el["rim"], y=cmp_el["mar_later"],
+                              name="Mar", marker_color=COLOR_MAR)
+                fig_l.update_layout(
+                    barmode="group",
+                    title="Later Date Changes — Feb vs Mar",
+                    xaxis_title="Rim (in)", yaxis_title="Changes",
+                    xaxis=dict(tickmode="linear"),
+                    legend=dict(orientation="h"), margin=dict(t=50, b=30),
+                )
+                st.plotly_chart(fig_l, use_container_width=True)
+
+            # ── % Earlier shift: how much did the earlier% change Feb→Mar? ──
+            st.markdown("### % Earlier Shift Feb → Mar (positive = more pull-ins)")
+            cmp_el["Δ earlier%"] = (cmp_el["mar_epct"] - cmp_el["feb_epct"]).round(1)
+            delta_colors = [
+                "#2ca02c" if v > 0 else ("#d62728" if v < 0 else "#7f7f7f")
+                for v in cmp_el["Δ earlier%"].fillna(0)
+            ]
+            fig_shift = go.Figure(go.Bar(
+                x=cmp_el["rim"],
+                y=cmp_el["Δ earlier%"],
+                marker_color=delta_colors,
+                text=cmp_el["Δ earlier%"].map(lambda v: f"{v:+.1f}pp" if pd.notna(v) else ""),
+                textposition="outside",
+            ))
+            fig_shift.update_layout(
+                title="Δ Earlier % (Mar − Feb) — 🟢 more pull-ins · 🔴 more push-outs",
+                xaxis_title="Rim (in)", yaxis_title="Δ percentage points",
+                xaxis=dict(tickmode="linear"), margin=dict(t=50, b=30),
+            )
+            st.plotly_chart(fig_shift, use_container_width=True)
+
             st.markdown("---")
-            st.markdown(f"#### Order Size Buckets — Rim {chosen_rim}\"")
-            qcols = st.columns(2)
-            for _df, _label, _color, _col in [
-                (feb_rim_df, "February", COLOR_FEB, qcols[0]),
-                (mar_rim_df, "March", COLOR_MAR, qcols[1]),
-            ]:
-                if _df is not None and not _df.empty:
-                    with _col:
-                        qg = qty_group_summary(_df)
-                        if not qg.empty:
-                            fig_qg = px.bar(
-                                qg, x="qty_group", y="n_changes",
-                                color_discrete_sequence=[_color],
-                                text="n_changes",
-                                labels={"qty_group": "Bucket", "n_changes": "Changes"},
-                                title=f"{_label}",
-                            )
-                            fig_qg.update_traces(
-                                texttemplate="%{text:,.0f}", textposition="outside"
-                            )
-                            fig_qg.update_layout(margin=dict(t=50, b=30))
-                            st.plotly_chart(fig_qg, use_container_width=True)
 
-            # Raw data explorer
-            st.markdown("---")
-            with st.expander(f"🗂️ Raw Data — Rim {chosen_rim}\""):
-                show_cols = st.columns(2)
-                if feb_rim_df is not None and not feb_rim_df.empty:
-                    with show_cols[0]:
-                        st.markdown("**February**")
-                        st.dataframe(feb_rim_df, use_container_width=True, hide_index=True)
-                if mar_rim_df is not None and not mar_rim_df.empty:
-                    with show_cols[1]:
-                        st.markdown("**March**")
-                        st.dataframe(mar_rim_df, use_container_width=True, hide_index=True)
+            # ── Summary table ────────────────────────────────────────────────
+            with st.expander("📋 Full Earlier / Later Summary Table"):
+                tbl = cmp_el.copy()
+                tbl["Δ Earlier"] = (tbl["mar_earlier"] - tbl["feb_earlier"]).map(lambda v: f"{v:+,.0f}" if pd.notna(v) else "")
+                tbl["Δ Later"]   = (tbl["mar_later"]   - tbl["feb_later"]).map(lambda v: f"{v:+,.0f}" if pd.notna(v) else "")
+                tbl["Feb Earlier %"] = tbl["feb_epct"].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "")
+                tbl["Mar Earlier %"] = tbl["mar_epct"].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "")
+                st.dataframe(
+                    tbl[["rim", "feb_earlier", "feb_later", "mar_earlier", "mar_later",
+                          "Δ Earlier", "Δ Later", "Feb Earlier %", "Mar Earlier %"]].rename(columns={
+                        "rim": "Rim (in)",
+                        "feb_earlier": "Feb Earlier", "feb_later": "Feb Later",
+                        "mar_earlier": "Mar Earlier", "mar_later": "Mar Later",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+
+        elif not feb_el.empty or not mar_el.empty:
+            _single = feb_el if not feb_el.empty else mar_el
+            _lbl = "February" if not feb_el.empty else "March"
+            with st.expander(f"📋 {_lbl} — Earlier / Later Table"):
+                st.dataframe(_single, use_container_width=True, hide_index=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 2 – CHANGE INTERVALS (QTY GROUP × RIM)
+# ═════════════════════════════════════════════════════════════════════════════
+with tabs[2]:
+    st.subheader("📦 Change Intervals by Rim — Quantity Group Breakdown")
+
+    def _filter_qty(df: pd.DataFrame | None, rims: list[int]) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["qty_group", "rim", "total"])
+        if rims:
+            return df[df["rim"].isin(rims)].copy()
+        return df.copy()
+
+    feb_qty_f = _filter_qty(feb_qty_df, selected_rims)
+    mar_qty_f = _filter_qty(mar_qty_df, selected_rims)
+
+    _has_feb_q = not feb_qty_f.empty
+    _has_mar_q = not mar_qty_f.empty
+
+    if not _has_feb_q and not _has_mar_q:
+        st.info(
+            "No quantity-group interval data found. "
+            "Please load CSV files that contain a 'Grouped confirmed quantity' pivot block."
+        )
+    else:
+        # ── KPIs ─────────────────────────────────────────────────────────────
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        if _has_feb_q:
+            kc1.metric("Feb — Total (all groups)", f"{feb_qty_f['total'].sum():,.0f}")
+        if _has_mar_q:
+            kc3.metric("Mar — Total (all groups)", f"{mar_qty_f['total'].sum():,.0f}")
+        if _has_feb_q and _has_mar_q:
+            _qdelta = mar_qty_f["total"].sum() - feb_qty_f["total"].sum()
+            kc4.metric("Δ Total (Mar − Feb)", f"{_qdelta:+,.0f}")
+
+        st.markdown("---")
+
+        # ── Stacked bar by rim (colour = qty_group) ───────────────────────────
+        st.markdown("### Distribution Across Quantity Groups per Rim")
+        col_q1, col_q2 = st.columns(2)
+
+        _grp_colors = px.colors.qualitative.Set2
+
+        for _qdf, _lbl, _col in [
+            (feb_qty_f, "February", col_q1),
+            (mar_qty_f, "March",    col_q2),
+        ]:
+            if _qdf.empty:
+                continue
+            with _col:
+                _sorted = _qdf.copy()
+                _cat_present = [g for g in QTY_GROUP_ORDER if g in _sorted["qty_group"].unique()]
+                _cat_present += sorted(set(_sorted["qty_group"].unique()) - set(_cat_present))
+                fig_st = px.bar(
+                    _sorted.sort_values(["qty_group", "rim"]),
+                    x="rim", y="total", color="qty_group",
+                    title=f"Qty Groups by Rim — {_lbl}",
+                    labels={"rim": "Rim (in)", "total": "Count", "qty_group": "Qty Group"},
+                    category_orders={"qty_group": _cat_present},
+                    barmode="stack",
+                    color_discrete_sequence=_grp_colors,
+                )
+                fig_st.update_layout(
+                    xaxis=dict(tickmode="linear"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
+                    margin=dict(t=70, b=30),
+                )
+                st.plotly_chart(fig_st, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Per-group: Feb vs Mar grouped bar ────────────────────────────────
+        st.markdown("### Feb vs Mar by Rim — per Quantity Group")
+
+        all_groups: set[str] = set()
+        if _has_feb_q:
+            all_groups.update(feb_qty_f["qty_group"].unique())
+        if _has_mar_q:
+            all_groups.update(mar_qty_f["qty_group"].unique())
+
+        sorted_groups = [g for g in QTY_GROUP_ORDER if g in all_groups]
+        sorted_groups += sorted(all_groups - set(sorted_groups))
+
+        # Two-column grid of per-group charts
+        for i in range(0, len(sorted_groups), 2):
+            row_cols = st.columns(2)
+            for j, group in enumerate(sorted_groups[i: i + 2]):
+                feb_g = (
+                    feb_qty_f[feb_qty_f["qty_group"] == group].sort_values("rim")
+                    if _has_feb_q else pd.DataFrame()
+                )
+                mar_g = (
+                    mar_qty_f[mar_qty_f["qty_group"] == group].sort_values("rim")
+                    if _has_mar_q else pd.DataFrame()
+                )
+                with row_cols[j]:
+                    fig_g = go.Figure()
+                    if not feb_g.empty:
+                        fig_g.add_bar(
+                            x=feb_g["rim"], y=feb_g["total"],
+                            name="Feb", marker_color=COLOR_FEB,
+                            text=feb_g["total"].map(lambda v: f"{v:,.0f}"),
+                            textposition="outside",
+                        )
+                    if not mar_g.empty:
+                        fig_g.add_bar(
+                            x=mar_g["rim"], y=mar_g["total"],
+                            name="Mar", marker_color=COLOR_MAR,
+                            text=mar_g["total"].map(lambda v: f"{v:,.0f}"),
+                            textposition="outside",
+                        )
+                    fig_g.update_layout(
+                        barmode="group",
+                        title=f"Qty Group: <b>{group}</b>",
+                        xaxis_title="Rim (in)", yaxis_title="Count",
+                        xaxis=dict(tickmode="linear"),
+                        legend=dict(orientation="h"),
+                        margin=dict(t=55, b=30),
+                    )
+                    st.plotly_chart(fig_g, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Heatmap: Δ (Mar − Feb) per (qty_group × rim) ─────────────────────
+        if _has_feb_q and _has_mar_q:
+            st.markdown("### 🌡️ Heatmap — Δ Count (Mar − Feb) per Qty Group × Rim")
+            merged_q = pd.merge(
+                feb_qty_f.rename(columns={"total": "feb"}),
+                mar_qty_f.rename(columns={"total": "mar"}),
+                on=["qty_group", "rim"], how="outer",
+            ).fillna(0)
+            merged_q["delta"] = merged_q["mar"] - merged_q["feb"]
+
+            pivot_heat = merged_q.pivot_table(
+                index="qty_group", columns="rim", values="delta", aggfunc="sum"
+            )
+            # Sort rows by QTY_GROUP_ORDER
+            _row_order = [g for g in QTY_GROUP_ORDER if g in pivot_heat.index]
+            _row_order += [g for g in pivot_heat.index if g not in _row_order]
+            pivot_heat = pivot_heat.reindex(_row_order)
+
+            fig_heat = go.Figure(go.Heatmap(
+                z=pivot_heat.values,
+                x=[str(int(c)) + '"' for c in pivot_heat.columns],
+                y=pivot_heat.index.tolist(),
+                colorscale="RdYlGn",
+                zmid=0,
+                text=np.where(
+                    np.abs(pivot_heat.values) >= 1,
+                    [[f"{v:+,.0f}" for v in row] for row in pivot_heat.values],
+                    "",
+                ),
+                texttemplate="%{text}",
+                colorbar=dict(title="Δ Count"),
+            ))
+            fig_heat.update_layout(
+                xaxis_title="Rim Size",
+                yaxis_title="Quantity Group",
+                margin=dict(t=40, b=30),
+                height=300,
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+        # ── Summary table ─────────────────────────────────────────────────────
+        st.markdown("---")
+        with st.expander("📋 Full Quantity Group × Rim Table"):
+            frames = []
+            if _has_feb_q:
+                frames.append(feb_qty_f.assign(Month="Feb"))
+            if _has_mar_q:
+                frames.append(mar_qty_f.assign(Month="Mar"))
+            if frames:
+                combined_q = pd.concat(frames)
+                pivot_tbl = (
+                    combined_q
+                    .pivot_table(
+                        index="qty_group", columns=["Month", "rim"],
+                        values="total", aggfunc="sum",
+                    )
+                    .reset_index()
+                )
+                pivot_tbl.columns = [
+                    f"{m} Rim {int(r)}\"" if m else str(r)
+                    for m, r in pivot_tbl.columns
+                ]
+                st.dataframe(pivot_tbl, use_container_width=True, hide_index=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOOTER
@@ -954,3 +1292,4 @@ st.caption(
     "Order Rescheduling Dashboard · Built with Streamlit & Plotly · "
     "Data: February & March 2026 rescheduling reports"
 )
+

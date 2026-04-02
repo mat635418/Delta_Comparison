@@ -7,3 +7,6 @@ numpy>=1.26.0
 
 # Visualisation
 plotly>=5.20.0
+
+# Optional: faster Streamlit file-watcher (recommended for development)
+watchdog>=3.0.0
