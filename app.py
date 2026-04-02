@@ -61,7 +61,7 @@ DEFAULT_MAR_PATTERNS = ["Mar.csv", "*[Mm]ar*.csv"]
 
 # Column-name aliases: key → list of possible raw names (lower-cased)
 COLUMN_ALIASES: dict[str, list[str]] = {
-    "date":      ["change_date_dat", "change_date_date", "date", "change_date"],
+    "date":      ["change_date_dat", "change_date_date", "change_date"],
     "month":     ["change_date_mont", "change_date_month", "month"],
     "rim":       ["rim_diameter_inche", "rim_diameter_inches", "rim_size",
                   "rim_diameter", "rim", "rim size"],
@@ -78,6 +78,12 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     "qty_group": ["grouped confirmed quantit", "grouped confirmed quantity",
                   "grouped_confirmed_qty", "qty_group"],
     "postponed": ["postponed_week", "postponed_weeks", "postponed"],
+    "n_orders":  ["count of order_line_number", "count_of_order_line_number",
+                  "count of order line number"],
+    "earlier_changes": ["_changes on earlier date", "changes on earlier date",
+                        "changes_on_earlier_date"],
+    "later_changes":   ["_changes on later date", "changes on later date",
+                        "changes_on_later_date"],
 }
 
 POSTPONE_ORDER = [
@@ -175,13 +181,17 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
     if header_idx is None:
         return pd.DataFrame(), ["CSV"]
 
-    # Build column headers; trim trailing empty columns
+    # Build column headers; take columns up to the first empty/sentinel cell.
+    # The pivot-table exports place a blank separator column immediately after
+    # the meaningful columns, so stopping at the first gap gives us exactly the
+    # core block (e.g. Rim size, Count of Order_Line_Number, _Count of Changes,
+    # _Changes on Earlier Date, _Changes on Later Date) and discards any extra
+    # calculated/comparison columns that may follow in some exports (Mar.csv).
     header = [str(h).strip() for h in raw.iloc[header_idx].tolist()]
-    last_non_empty = max(
-        (j for j, h in enumerate(header) if h.lower() not in _EMPTY),
-        default=len(header) - 1,
+    first_empty = next(
+        (j for j, h in enumerate(header) if h.lower() in _EMPTY), len(header)
     )
-    header = header[: last_non_empty + 1]
+    header = header[:first_empty]
 
     # Collect data rows: only rows whose first cell is a plain number (rim size).
     # With dtype=str, pandas represents empty cells as the string "nan"; we skip
