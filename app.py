@@ -10,7 +10,6 @@ Usage:
 
 import os
 import glob as glob_module
-from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -56,9 +55,9 @@ st.markdown(
 COLOR_FEB = "#1f77b4"
 COLOR_MAR = "#ff7f0e"
 
-# Candidate default filenames (case-insensitive glob) — CSV first, then Excel
-DEFAULT_FEB_PATTERNS = ["Feb.csv", "*[Ff]eb*.csv", "*[Ff]eb*.xlsx", "*[Ff]eb*.xls", "Feb_v1.xlsx"]
-DEFAULT_MAR_PATTERNS = ["Mar.csv", "*[Mm]ar*.csv", "*[Mm]ar*.xlsx", "*[Mm]ar*.xls", "Mar_v1.xlsx"]
+# Candidate default CSV filenames (case-insensitive glob)
+DEFAULT_FEB_PATTERNS = ["Feb.csv", "*[Ff]eb*.csv"]
+DEFAULT_MAR_PATTERNS = ["Mar.csv", "*[Mm]ar*.csv"]
 
 # Column-name aliases: key → list of possible raw names (lower-cased)
 COLUMN_ALIASES: dict[str, list[str]] = {
@@ -142,50 +141,6 @@ def find_default_file(patterns: list[str]) -> tuple[bytes, str] | None:
                 with open(literal, "rb") as fh:
                     return fh.read(), os.path.basename(literal)
     return None
-
-
-@st.cache_data(show_spinner="Parsing file…")
-def load_excel(content: bytes) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Load an Excel file, auto-detect the data sheet, and return a normalised
-    DataFrame plus the list of all sheet names.
-    """
-    xf = pd.ExcelFile(BytesIO(content))
-    sheet_names = xf.sheet_names
-
-    # Prefer first non-Summary sheet as raw data
-    data_sheet = sheet_names[0]
-    for s in sheet_names:
-        if "summary" not in s.lower():
-            data_sheet = s
-            break
-
-    df = pd.read_excel(BytesIO(content), sheet_name=data_sheet)
-
-    # Rename columns to standard keys
-    rename: dict[str, str] = {}
-    for key in COLUMN_ALIASES:
-        raw = find_col(df, key)
-        if raw and raw not in rename:
-            rename[raw] = key
-    df = df.rename(columns=rename)
-
-    # Drop rows that are completely empty
-    df = df.dropna(how="all")
-
-    # Type coercions
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    if "rim" in df.columns:
-        df["rim"] = pd.to_numeric(df["rim"], errors="coerce")
-    if "n_changes" in df.columns:
-        df["n_changes"] = pd.to_numeric(df["n_changes"], errors="coerce").fillna(1)
-    else:
-        df["n_changes"] = 1  # each row counts as one change
-    if "qty" in df.columns:
-        df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
-
-    return df, sheet_names
 
 
 @st.cache_data(show_spinner="Parsing CSV file…")
@@ -285,10 +240,8 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
 
 
 def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, list[str]]:
-    """Dispatch to load_csv or load_excel based on the file extension."""
-    if filename.lower().endswith(".csv"):
-        return load_csv(content)
-    return load_excel(content)
+    """Load a CSV file."""
+    return load_csv(content)
 
 
 def filter_rims(df: pd.DataFrame, rims: list[int]) -> pd.DataFrame:
@@ -581,15 +534,15 @@ with st.sidebar:
 
     load_defaults = st.button(
         "⬇️ Load Default Files",
-        help="Load Feb & Mar files (CSV or Excel) from the repo root folder",
+        help="Load Feb & Mar CSV files from the repo root folder",
         use_container_width=True,
     )
 
     feb_upload = st.file_uploader(
-        "Upload February file", type=["xlsx", "xls", "csv"], key="feb_up"
+        "Upload February file", type=["csv"], key="feb_up"
     )
     mar_upload = st.file_uploader(
-        "Upload March file", type=["xlsx", "xls", "csv"], key="mar_up"
+        "Upload March file", type=["csv"], key="mar_up"
     )
 
     st.markdown("---")
@@ -632,16 +585,14 @@ if mar_upload:
 
 feb_df: pd.DataFrame | None = None
 mar_df: pd.DataFrame | None = None
-feb_sheets: list[str] = []
-mar_sheets: list[str] = []
 
 if feb_bytes:
     with st.spinner("Loading February file…"):
-        feb_df, feb_sheets = load_file(feb_bytes, feb_fname)
+        feb_df, _ = load_file(feb_bytes, feb_fname)
 
 if mar_bytes:
     with st.spinner("Loading March file…"):
-        mar_df, mar_sheets = load_file(mar_bytes, mar_fname)
+        mar_df, _ = load_file(mar_bytes, mar_fname)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIM FILTER (sidebar)
@@ -681,7 +632,7 @@ st.markdown(
 
 if feb_df is None and mar_df is None:
     st.info(
-        "👈 Upload your February and March Excel files, or click **Load Default Files** "
+        "👈 Upload your February and March CSV files, or click **Load Default Files** "
         "to begin analysis."
     )
     st.stop()
@@ -801,15 +752,11 @@ with tabs[0]:
         with info_col1:
             if feb_df is not None:
                 st.markdown(f"**February file:** `{feb_name}`")
-                if feb_sheets != ["CSV"]:
-                    st.markdown(f"- Sheets: {', '.join(feb_sheets)}")
                 st.markdown(f"- Rows (raw): {len(feb_df):,}")
                 st.markdown(f"- Columns: {', '.join(feb_df.columns.tolist())}")
         with info_col2:
             if mar_df is not None:
                 st.markdown(f"**March file:** `{mar_name}`")
-                if mar_sheets != ["CSV"]:
-                    st.markdown(f"- Sheets: {', '.join(mar_sheets)}")
                 st.markdown(f"- Rows (raw): {len(mar_df):,}")
                 st.markdown(f"- Columns: {', '.join(mar_df.columns.tolist())}")
 
