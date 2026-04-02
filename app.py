@@ -639,19 +639,17 @@ if feb_df is None and mar_df is None:
 
 tabs = st.tabs(
     [
-        "🏠 Overview",
+        "⚖️ Feb vs March",
         "📅 February",
         "📅 March",
-        "⚖️ Feb vs March",
         "🔍 Rim Deep-Dive",
     ]
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 0 – OVERVIEW
+# (Overview removed — was tab 0)
 # ═════════════════════════════════════════════════════════════════════════════
-with tabs[0]:
-    st.subheader("Executive Overview")
+if False:
 
     feb_total = int(feb_df_f["n_changes"].sum()) if feb_df_f is not None else None
     mar_total = int(mar_df_f["n_changes"].sum()) if mar_df_f is not None else None
@@ -781,9 +779,9 @@ with tabs[2]:
         render_month_panel(mar_df_f, "March", COLOR_MAR)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 – FEB vs MARCH COMPARISON
+# TAB 0 – FEB vs MARCH COMPARISON  (previously tab 3)
 # ═════════════════════════════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[0]:
     if feb_df_f is None or mar_df_f is None:
         st.info("Please load both February and March files to see the comparison.")
     else:
