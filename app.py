@@ -449,7 +449,7 @@ def render_month_panel(df: pd.DataFrame, label: str, color: str) -> None:
     n_countries = df["country"].nunique() if "country" in df.columns else "—"
     n_customers = df["customer"].nunique() if "customer" in df.columns else "—"
     date_range = (
-        f"{df['date'].min().strftime('%d %b %Y')} → {df['date'].max().strftime('%d %b %Y')}"
+        f"{pd.to_datetime(df['date']).min().strftime('%d %b %Y')} → {pd.to_datetime(df['date']).max().strftime('%d %b %Y')}"
         if "date" in df.columns and df["date"].notna().any()
         else "—"
     )
