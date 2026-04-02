@@ -56,18 +56,19 @@ st.markdown(
 COLOR_FEB = "#1f77b4"
 COLOR_MAR = "#ff7f0e"
 
-# Candidate default filenames (case-insensitive glob)
-DEFAULT_FEB_PATTERNS = ["*[Ff]eb*.xlsx", "*[Ff]eb*.xls", "Feb_v1.xlsx"]
-DEFAULT_MAR_PATTERNS = ["*[Mm]ar*.xlsx", "*[Mm]ar*.xls", "Mar_v1.xlsx"]
+# Candidate default filenames (case-insensitive glob) — CSV first, then Excel
+DEFAULT_FEB_PATTERNS = ["Feb.csv", "*[Ff]eb*.csv", "*[Ff]eb*.xlsx", "*[Ff]eb*.xls", "Feb_v1.xlsx"]
+DEFAULT_MAR_PATTERNS = ["Mar.csv", "*[Mm]ar*.csv", "*[Mm]ar*.xlsx", "*[Mm]ar*.xls", "Mar_v1.xlsx"]
 
 # Column-name aliases: key → list of possible raw names (lower-cased)
 COLUMN_ALIASES: dict[str, list[str]] = {
     "date":      ["change_date_dat", "change_date_date", "date", "change_date"],
     "month":     ["change_date_mont", "change_date_month", "month"],
     "rim":       ["rim_diameter_inche", "rim_diameter_inches", "rim_size",
-                  "rim_diameter", "rim"],
+                  "rim_diameter", "rim", "rim size"],
     "n_changes": ["number of changes", "number_of_changes", "no_of_changes",
-                  "numberofchanges"],
+                  "numberofchanges", "number_of changes", "_count of changes",
+                  "count of changes", "count_of_changes", "_count_of_changes"],
     "qty":       ["new_confirmed_qty", "new_confirmed_quantity",
                   "confirmed_qty", "qty"],
     "sales_org": ["sales_organisation_cod", "sales_organisation_code",
@@ -117,17 +118,29 @@ def find_extra_cols(df: pd.DataFrame, known_keys: list[str]) -> list[str]:
     return [c for c in df.columns if c not in mapped]
 
 
-def find_default_file(patterns: list[str]) -> bytes | None:
-    """Try to load the first matching file from the working directory."""
+def find_default_file(patterns: list[str]) -> tuple[bytes, str] | None:
+    """
+    Try to load the first matching file from the working directory or the
+    script's own directory.  Returns (file_bytes, filename) or None.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    search_dirs = [os.getcwd()]
+    if script_dir != os.getcwd():
+        search_dirs.append(script_dir)
+
     for pattern in patterns:
-        matches = glob_module.glob(pattern)
-        if matches:
-            with open(matches[0], "rb") as fh:
-                return fh.read()
-        # Also try the literal name directly
-        if os.path.isfile(pattern):
-            with open(pattern, "rb") as fh:
-                return fh.read()
+        for base in search_dirs:
+            full_pattern = os.path.join(base, pattern)
+            matches = glob_module.glob(full_pattern)
+            if matches:
+                fpath = matches[0]
+                with open(fpath, "rb") as fh:
+                    return fh.read(), os.path.basename(fpath)
+            # Literal match (pattern may already be an exact relative path)
+            literal = os.path.join(base, pattern)
+            if os.path.isfile(literal):
+                with open(literal, "rb") as fh:
+                    return fh.read(), os.path.basename(literal)
     return None
 
 
@@ -173,6 +186,107 @@ def load_excel(content: bytes) -> tuple[pd.DataFrame, list[str]]:
         df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
 
     return df, sheet_names
+
+
+@st.cache_data(show_spinner="Parsing CSV file…")
+def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Load a semicolon-separated pivot-table CSV export (e.g. Feb.csv / Mar.csv).
+
+    The file contains one or more summary blocks.  Each block has a header row
+    whose first cell is "Rim size" (case-insensitive) followed by data rows
+    whose first cell is a numeric rim diameter.  We use the *last* such block
+    so that if both a simple and a detailed table are present the richer one
+    wins.
+    """
+    import io as _io
+
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    raw = pd.read_csv(_io.StringIO(text), sep=";", header=None, dtype=str)
+
+    # Sentinel values that represent "no content" in a cell read with dtype=str
+    _EMPTY = ("", "nan", "none")
+
+    # Find the last row whose first cell is "Rim size"
+    header_idx: int | None = None
+    for i, row in raw.iterrows():
+        if str(row.iloc[0]).strip().lower() == "rim size":
+            header_idx = i
+
+    if header_idx is None:
+        return pd.DataFrame(), ["CSV"]
+
+    # Build column headers; trim trailing empty columns
+    header = [str(h).strip() for h in raw.iloc[header_idx].tolist()]
+    last_non_empty = max(
+        (j for j, h in enumerate(header) if h.lower() not in _EMPTY),
+        default=len(header) - 1,
+    )
+    header = header[: last_non_empty + 1]
+
+    # Collect data rows: only rows whose first cell is a plain number (rim size).
+    # With dtype=str, pandas represents empty cells as the string "nan"; we skip
+    # those explicitly so that float("nan") does not silently pass the check.
+    data_rows: list[list] = []
+    for i in range(header_idx + 1, len(raw)):
+        row = raw.iloc[i]
+        first = str(row.iloc[0]).strip()
+        if first.lower() in _EMPTY:
+            continue
+        try:
+            float(first)
+        except ValueError:
+            continue
+        data_rows.append(row.iloc[: len(header)].tolist())
+
+    if not data_rows:
+        return pd.DataFrame(), ["CSV"]
+
+    df = pd.DataFrame(data_rows, columns=header)
+    # Remove columns that are entirely empty or have empty/sentinel names
+    df = df.dropna(axis=1, how="all")
+    df = df[[c for c in df.columns if c.lower() not in _EMPTY]]
+
+    # Rename columns to standard keys
+    rename: dict[str, str] = {}
+    for key in COLUMN_ALIASES:
+        raw_col = find_col(df, key)
+        if raw_col and raw_col not in rename:
+            rename[raw_col] = key
+    df = df.rename(columns=rename)
+
+    # Type coercions
+    if "rim" in df.columns:
+        df["rim"] = pd.to_numeric(df["rim"], errors="coerce")
+    if "n_changes" in df.columns:
+        # Values may use comma as decimal separator (e.g. " 1,03 ")
+        df["n_changes"] = (
+            df["n_changes"]
+            .astype(str)
+            .str.strip()
+            .str.replace(",", ".", regex=False)
+            .pipe(pd.to_numeric, errors="coerce")
+            .fillna(1)
+        )
+    else:
+        df["n_changes"] = 1
+
+    df = df.dropna(how="all")
+    # Drop any rows where rim is still NaN after coercion
+    if "rim" in df.columns:
+        df = df.dropna(subset=["rim"])
+    return df, ["CSV"]
+
+
+def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, list[str]]:
+    """Dispatch to load_csv or load_excel based on the file extension."""
+    if filename.lower().endswith(".csv"):
+        return load_csv(content)
+    return load_excel(content)
 
 
 def filter_rims(df: pd.DataFrame, rims: list[int]) -> pd.DataFrame:
@@ -461,15 +575,15 @@ with st.sidebar:
 
     load_defaults = st.button(
         "⬇️ Load Default Files",
-        help="Load Feb & Mar Excel files from the repo root folder",
+        help="Load Feb & Mar files (CSV or Excel) from the repo root folder",
         use_container_width=True,
     )
 
     feb_upload = st.file_uploader(
-        "Upload February file", type=["xlsx", "xls"], key="feb_up"
+        "Upload February file", type=["xlsx", "xls", "csv"], key="feb_up"
     )
     mar_upload = st.file_uploader(
-        "Upload March file", type=["xlsx", "xls"], key="mar_up"
+        "Upload March file", type=["xlsx", "xls", "csv"], key="mar_up"
     )
 
     st.markdown("---")
@@ -485,21 +599,29 @@ feb_bytes: bytes | None = None
 mar_bytes: bytes | None = None
 feb_name = "February"
 mar_name = "March"
+feb_fname: str = ""   # actual filename, used to pick the right loader
+mar_fname: str = ""
 
 if load_defaults:
-    feb_bytes = find_default_file(DEFAULT_FEB_PATTERNS)
-    mar_bytes = find_default_file(DEFAULT_MAR_PATTERNS)
-    if feb_bytes is None:
+    result_feb = find_default_file(DEFAULT_FEB_PATTERNS)
+    result_mar = find_default_file(DEFAULT_MAR_PATTERNS)
+    if result_feb:
+        feb_bytes, feb_fname = result_feb
+    else:
         st.sidebar.warning("⚠️ No February file found in root folder.")
-    if mar_bytes is None:
+    if result_mar:
+        mar_bytes, mar_fname = result_mar
+    else:
         st.sidebar.warning("⚠️ No March file found in root folder.")
 
 if feb_upload:
     feb_bytes = feb_upload.read()
+    feb_fname = feb_upload.name
     feb_name = feb_upload.name
 
 if mar_upload:
     mar_bytes = mar_upload.read()
+    mar_fname = mar_upload.name
     mar_name = mar_upload.name
 
 feb_df: pd.DataFrame | None = None
@@ -509,11 +631,11 @@ mar_sheets: list[str] = []
 
 if feb_bytes:
     with st.spinner("Loading February file…"):
-        feb_df, feb_sheets = load_excel(feb_bytes)
+        feb_df, feb_sheets = load_file(feb_bytes, feb_fname)
 
 if mar_bytes:
     with st.spinner("Loading March file…"):
-        mar_df, mar_sheets = load_excel(mar_bytes)
+        mar_df, mar_sheets = load_file(mar_bytes, mar_fname)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIM FILTER (sidebar)
@@ -673,13 +795,15 @@ with tabs[0]:
         with info_col1:
             if feb_df is not None:
                 st.markdown(f"**February file:** `{feb_name}`")
-                st.markdown(f"- Sheets: {', '.join(feb_sheets)}")
+                if feb_sheets != ["CSV"]:
+                    st.markdown(f"- Sheets: {', '.join(feb_sheets)}")
                 st.markdown(f"- Rows (raw): {len(feb_df):,}")
                 st.markdown(f"- Columns: {', '.join(feb_df.columns.tolist())}")
         with info_col2:
             if mar_df is not None:
                 st.markdown(f"**March file:** `{mar_name}`")
-                st.markdown(f"- Sheets: {', '.join(mar_sheets)}")
+                if mar_sheets != ["CSV"]:
+                    st.markdown(f"- Sheets: {', '.join(mar_sheets)}")
                 st.markdown(f"- Rows (raw): {len(mar_df):,}")
                 st.markdown(f"- Columns: {', '.join(mar_df.columns.tolist())}")
 
