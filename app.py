@@ -260,6 +260,8 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, list[str]]:
     df = df.rename(columns=rename)
 
     # Type coercions
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
     if "rim" in df.columns:
         df["rim"] = pd.to_numeric(df["rim"], errors="coerce")
     if "n_changes" in df.columns:
@@ -448,11 +450,15 @@ def render_month_panel(df: pd.DataFrame, label: str, color: str) -> None:
     n_rims = df["rim"].nunique() if "rim" in df.columns else "—"
     n_countries = df["country"].nunique() if "country" in df.columns else "—"
     n_customers = df["customer"].nunique() if "customer" in df.columns else "—"
-    date_range = (
-        f"{pd.to_datetime(df['date']).min().strftime('%d %b %Y')} → {pd.to_datetime(df['date']).max().strftime('%d %b %Y')}"
-        if "date" in df.columns and df["date"].notna().any()
-        else "—"
-    )
+    if "date" in df.columns:
+        _dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        date_range = (
+            f"{_dates.min().strftime('%d %b %Y')} → {_dates.max().strftime('%d %b %Y')}"
+            if not _dates.empty
+            else "—"
+        )
+    else:
+        date_range = "—"
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Changes", f"{total:,}")
