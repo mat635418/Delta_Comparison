@@ -637,149 +637,10 @@ if feb_df is None and mar_df is None:
     )
     st.stop()
 
-tabs = st.tabs(
-    [
-        "⚖️ Feb vs March",
-        "📅 February",
-        "📅 March",
-        "🔍 Rim Deep-Dive",
-    ]
-)
+tabs = st.tabs(["⚖️ Feb vs March", "🔍 Rim Deep-Dive"])
 
 # ═════════════════════════════════════════════════════════════════════════════
-# (Overview removed — was tab 0)
-# ═════════════════════════════════════════════════════════════════════════════
-if False:
-
-    feb_total = int(feb_df_f["n_changes"].sum()) if feb_df_f is not None else None
-    mar_total = int(mar_df_f["n_changes"].sum()) if mar_df_f is not None else None
-
-    kpi_cols = st.columns(4)
-    if feb_total is not None:
-        kpi_cols[0].metric(
-            "Feb — Total Changes",
-            f"{feb_total:,}",
-            help="Sum of all rescheduling changes in February",
-        )
-    if mar_total is not None:
-        kpi_cols[1].metric(
-            "Mar — Total Changes",
-            f"{mar_total:,}",
-            help="Sum of all rescheduling changes in March",
-        )
-    if feb_total and mar_total:
-        delta_abs = mar_total - feb_total
-        delta_pct = (delta_abs / feb_total) * 100
-        kpi_cols[2].metric(
-            "Month-over-Month Δ",
-            f"{delta_abs:+,}",
-            delta=f"{delta_pct:+.1f}%",
-        )
-        # Biggest rim in March (if available)
-        if mar_df_f is not None and "rim" in mar_df_f.columns:
-            top_rim = (
-                mar_df_f.groupby("rim")["n_changes"].sum().idxmax()
-            )
-            kpi_cols[3].metric(
-                "Highest-Volume Rim (Mar)",
-                f'{int(top_rim)}"',
-                help="Rim size with the most changes in March",
-            )
-
-    st.markdown("---")
-
-    # Dual-axis rim comparison (if both months loaded)
-    if feb_df_f is not None and mar_df_f is not None:
-        df_feb_rim = rim_summary(feb_df_f).rename(columns={"n_changes": "feb"})
-        df_mar_rim = rim_summary(mar_df_f).rename(columns={"n_changes": "mar"})
-        merged = pd.merge(
-            df_feb_rim[["rim", "feb"]],
-            df_mar_rim[["rim", "mar"]],
-            on="rim",
-            how="outer",
-        ).sort_values("rim")
-
-        fig = go.Figure()
-        fig.add_bar(
-            x=merged["rim"],
-            y=merged["feb"],
-            name="February",
-            marker_color=COLOR_FEB,
-            text=merged["feb"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else ""),
-            textposition="outside",
-        )
-        fig.add_bar(
-            x=merged["rim"],
-            y=merged["mar"],
-            name="March",
-            marker_color=COLOR_MAR,
-            text=merged["mar"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else ""),
-            textposition="outside",
-        )
-        fig.update_layout(
-            barmode="group",
-            title="Number of Changes per Rim Size — Feb vs March",
-            xaxis_title="Rim Size (inches)",
-            yaxis_title="Number of Changes",
-            xaxis=dict(tickmode="linear"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(t=60, b=30),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Table
-        with st.expander("📋 Combined Rim Summary Table"):
-            merged["Δ (abs)"] = (merged["mar"] - merged["feb"]).round(0)
-            merged["Δ (%)"] = ((merged["Δ (abs)"] / merged["feb"]) * 100).round(1)
-            st.dataframe(
-                merged.rename(
-                    columns={
-                        "rim": "Rim (in)",
-                        "feb": "Feb Changes",
-                        "mar": "Mar Changes",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    # File info
-    st.markdown("---")
-    with st.expander("ℹ️ File Details"):
-        info_col1, info_col2 = st.columns(2)
-        with info_col1:
-            if feb_df is not None:
-                st.markdown(f"**February file:** `{feb_name}`")
-                st.markdown(f"- Rows (raw): {len(feb_df):,}")
-                st.markdown(f"- Columns: {', '.join(feb_df.columns.tolist())}")
-        with info_col2:
-            if mar_df is not None:
-                st.markdown(f"**March file:** `{mar_name}`")
-                st.markdown(f"- Rows (raw): {len(mar_df):,}")
-                st.markdown(f"- Columns: {', '.join(mar_df.columns.tolist())}")
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 1 – FEBRUARY
-# ═════════════════════════════════════════════════════════════════════════════
-with tabs[1]:
-    if feb_df_f is None:
-        st.info("No February file loaded.")
-    else:
-        st.subheader("February — Detailed Analysis")
-        render_month_panel(feb_df_f, "February", COLOR_FEB)
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 2 – MARCH
-# ═════════════════════════════════════════════════════════════════════════════
-with tabs[2]:
-    if mar_df_f is None:
-        st.info("No March file loaded.")
-    else:
-        st.subheader("March — Detailed Analysis")
-        render_month_panel(mar_df_f, "March", COLOR_MAR)
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 0 – FEB vs MARCH COMPARISON  (previously tab 3)
+# TAB 0 – FEB vs MARCH COMPARISON
 # ═════════════════════════════════════════════════════════════════════════════
 with tabs[0]:
     if feb_df_f is None or mar_df_f is None:
@@ -798,6 +659,9 @@ with tabs[0]:
         cmp = pd.merge(df_feb_r, df_mar_r, on="rim", how="outer").sort_values("rim")
         cmp["Δ abs"] = cmp["Mar"] - cmp["Feb"]
         cmp["Δ %"] = (cmp["Δ abs"] / cmp["Feb"] * 100).round(1)
+        cmp["Trend"] = cmp["Δ abs"].apply(
+            lambda v: "🟢 Better" if pd.notna(v) and v < 0 else ("🔴 Worse" if pd.notna(v) and v > 0 else "➖ Flat")
+        )
 
         col_l, col_r = st.columns(2)
         with col_l:
@@ -819,7 +683,7 @@ with tabs[0]:
 
         with col_r:
             colors_delta = [
-                COLOR_MAR if v >= 0 else COLOR_FEB
+                "#d62728" if v > 0 else ("#2ca02c" if v < 0 else "#7f7f7f")
                 for v in cmp["Δ %"].fillna(0)
             ]
             fig_delta = go.Figure(
@@ -832,7 +696,7 @@ with tabs[0]:
                 )
             )
             fig_delta.update_layout(
-                title="Month-over-Month Change (%) by Rim",
+                title="Month-over-Month Change (%) by Rim — 🟢 better · 🔴 worse",
                 xaxis_title="Rim (in)",
                 yaxis_title="Δ %",
                 xaxis=dict(tickmode="linear"),
@@ -840,54 +704,19 @@ with tabs[0]:
             )
             st.plotly_chart(fig_delta, use_container_width=True)
 
-        with st.expander("📋 Rim Comparison Table"):
-            st.dataframe(
-                cmp.rename(
-                    columns={
-                        "rim": "Rim (in)",
-                        "Feb": "Feb Changes",
-                        "Mar": "Mar Changes",
-                        "Δ abs": "Δ (absolute)",
-                        "Δ %": "Δ (%)",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.markdown("---")
-
-        # ── Country comparison ─────────────────────────────────────────────
-        st.markdown("### Country Comparison")
-        df_fc = country_summary(feb_df_f, top_n=15).rename(
-            columns={"n_changes": "Feb"}
+        st.dataframe(
+            cmp.rename(
+                columns={
+                    "rim": "Rim (in)",
+                    "Feb": "Feb Changes",
+                    "Mar": "Mar Changes",
+                    "Δ abs": "Δ (absolute)",
+                    "Δ %": "Δ (%)",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
         )
-        df_mc = country_summary(mar_df_f, top_n=15).rename(
-            columns={"n_changes": "Mar"}
-        )
-        cmp_c = pd.merge(df_fc, df_mc, on="country", how="outer").fillna(0)
-        cmp_c["Δ %"] = (
-            (cmp_c["Mar"] - cmp_c["Feb"]) / cmp_c["Feb"].replace(0, np.nan) * 100
-        ).round(1)
-        cmp_c = cmp_c.sort_values("Mar", ascending=False).head(15)
-
-        fig_cntry = go.Figure()
-        fig_cntry.add_bar(
-            x=cmp_c["country"], y=cmp_c["Feb"], name="Feb", marker_color=COLOR_FEB
-        )
-        fig_cntry.add_bar(
-            x=cmp_c["country"], y=cmp_c["Mar"], name="Mar", marker_color=COLOR_MAR
-        )
-        fig_cntry.update_layout(
-            barmode="group",
-            title="Top Countries — Feb vs March",
-            xaxis_title="Country",
-            yaxis_title="Changes",
-            legend=dict(orientation="h"),
-            margin=dict(t=50, b=80),
-            xaxis=dict(tickangle=-30),
-        )
-        st.plotly_chart(fig_cntry, use_container_width=True)
 
         st.markdown("---")
 
@@ -956,9 +785,9 @@ with tabs[0]:
             st.plotly_chart(fig_trend, use_container_width=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 4 – RIM DEEP-DIVE
+# TAB 1 – RIM DEEP-DIVE
 # ═════════════════════════════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[1]:
     st.subheader("Rim Size Deep-Dive")
 
     if feb_df is None and mar_df is None:
