@@ -1278,7 +1278,7 @@ with tabs[2]:
                     .reset_index()
                 )
                 pivot_tbl.columns = [
-                    f"{m} Rim {int(r)}\"" if m else str(r)
+                    f"{m} Rim {int(r)}\"" if m and str(r).strip() else str(r)
                     for m, r in pivot_tbl.columns
                 ]
                 st.dataframe(pivot_tbl, use_container_width=True, hide_index=True)
