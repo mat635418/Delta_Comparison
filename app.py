@@ -8,6 +8,8 @@ Usage:
     streamlit run app.py
 """
 
+import gc
+import io as _io
 import os
 import glob as glob_module
 
@@ -335,6 +337,87 @@ def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, pd.DataFrame
     return load_csv(content)
 
 
+@st.cache_data(show_spinner="Aggregating raw CSV (memory-safe)…", max_entries=2)
+def load_raw_csv(content: bytes) -> pd.DataFrame:
+    """
+    Load a raw flat-format CSV (e.g. Feb_raw.csv / Mar_raw.csv) in a
+    memory-efficient way.  The file is read in 50 000-row chunks; each
+    chunk is immediately aggregated to a per-rim summary and discarded,
+    so peak RAM stays well below the 512 MB service limit even for 50 MB
+    inputs.
+
+    Returns a small DataFrame with columns:
+        rim, n_changes, n_orderlines, pct_changes, pct_orderlines
+    """
+    # Sniff separator from the first 2 KB (no full decode needed)
+    sample = content[:2048].decode("utf-8", errors="replace")
+    sep = ";" if ";" in sample else ("," if "," in sample else "\t")
+
+    buf = _io.BytesIO(content)
+    header_df = pd.read_csv(buf, sep=sep, nrows=0)
+    buf.seek(0)
+    cols = header_df.columns.tolist()
+
+    # Fuzzy-locate the rim-diameter and number-of-changes columns
+    rim_col = next(
+        (c for c in cols if "rim" in c.lower() and "inch" in c.lower()), None
+    ) or next((c for c in cols if "rim" in c.lower()), None)
+
+    changes_col = next(
+        (c for c in cols if "number" in c.lower() and "change" in c.lower()), None
+    ) or next((c for c in cols if "change" in c.lower()), None)
+
+    if not rim_col or not changes_col:
+        return pd.DataFrame(columns=["rim", "n_changes", "n_orderlines",
+                                     "pct_changes", "pct_orderlines"])
+
+    parts: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        buf,
+        sep=sep,
+        usecols=[rim_col, changes_col],
+        dtype={rim_col: "float32", changes_col: "float32"},
+        chunksize=50_000,
+        low_memory=True,
+    ):
+        chunk = chunk.rename(columns={rim_col: "rim", changes_col: "n_changes"})
+        chunk["n_changes"] = pd.to_numeric(chunk["n_changes"], errors="coerce").fillna(1)
+        chunk["rim"] = pd.to_numeric(chunk["rim"], errors="coerce")
+        part = (
+            chunk.dropna(subset=["rim"])
+            .groupby("rim")
+            .agg(n_changes=("n_changes", "sum"), n_orderlines=("rim", "count"))
+            .reset_index()
+        )
+        parts.append(part)
+
+    gc.collect()
+
+    if not parts:
+        return pd.DataFrame(columns=["rim", "n_changes", "n_orderlines",
+                                     "pct_changes", "pct_orderlines"])
+
+    result = (
+        pd.concat(parts, ignore_index=True)
+        .groupby("rim")
+        .agg(n_changes=("n_changes", "sum"), n_orderlines=("n_orderlines", "sum"))
+        .reset_index()
+        .sort_values("rim")
+    )
+
+    total_changes = result["n_changes"].sum()
+    total_orderlines = result["n_orderlines"].sum()
+    result["pct_changes"] = (
+        (result["n_changes"] / total_changes * 100).round(2) if total_changes else 0.0
+    )
+    result["pct_orderlines"] = (
+        (result["n_orderlines"] / total_orderlines * 100).round(2)
+        if total_orderlines
+        else 0.0
+    )
+    return result
+
+
 def filter_rims(df: pd.DataFrame, rims: list[int]) -> pd.DataFrame:
     if "rim" in df.columns and rims:
         return df[df["rim"].isin(rims)]
@@ -637,6 +720,20 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.subheader("🔬 Raw Data Files")
+    st.caption(
+        "Upload 50 MB flat exports (Feb_raw.csv / Mar_raw.csv) for refined "
+        "rim-level analysis.  Files are aggregated on load — only a small "
+        "summary is kept in memory."
+    )
+    feb_raw_upload = st.file_uploader(
+        "Upload February raw file", type=["csv"], key="feb_raw_up"
+    )
+    mar_raw_upload = st.file_uploader(
+        "Upload March raw file", type=["csv"], key="mar_raw_up"
+    )
+
+    st.markdown("---")
     st.subheader("🔧 Global Filters")
 
     # Rim selector — populated after data loads
@@ -674,6 +771,14 @@ if mar_upload:
     mar_fname = mar_upload.name
     mar_name = mar_upload.name
 
+# ── Raw files (uploaded only; not loaded from root) ───────────────────────────
+feb_raw_bytes: bytes | None = None
+mar_raw_bytes: bytes | None = None
+if feb_raw_upload:
+    feb_raw_bytes = feb_raw_upload.read()
+if mar_raw_upload:
+    mar_raw_bytes = mar_raw_upload.read()
+
 feb_df: pd.DataFrame | None = None
 mar_df: pd.DataFrame | None = None
 feb_qty_df: pd.DataFrame | None = None
@@ -686,6 +791,21 @@ if feb_bytes:
 if mar_bytes:
     with st.spinner("Loading March file…"):
         mar_df, mar_qty_df, _ = load_file(mar_bytes, mar_fname)
+
+feb_raw_df: pd.DataFrame | None = None
+mar_raw_df: pd.DataFrame | None = None
+
+if feb_raw_bytes:
+    with st.spinner("Aggregating February raw file…"):
+        feb_raw_df = load_raw_csv(feb_raw_bytes)
+    if feb_raw_df.empty:
+        st.sidebar.warning("⚠️ Feb raw file: could not detect rim/changes columns.")
+
+if mar_raw_bytes:
+    with st.spinner("Aggregating March raw file…"):
+        mar_raw_df = load_raw_csv(mar_raw_bytes)
+    if mar_raw_df.empty:
+        st.sidebar.warning("⚠️ Mar raw file: could not detect rim/changes columns.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIM FILTER (sidebar)
@@ -730,7 +850,7 @@ if feb_df is None and mar_df is None:
     )
     st.stop()
 
-tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals"])
+tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals", "📊 Raw: Changes % by Rim"])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 0 – FEB vs MARCH COMPARISON
@@ -1282,6 +1402,213 @@ with tabs[2]:
                     for m, r in pivot_tbl.columns
                 ]
                 st.dataframe(pivot_tbl, use_container_width=True, hide_index=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 3 – RAW DATA: CHANGES % BY RIM
+# ═════════════════════════════════════════════════════════════════════════════
+with tabs[3]:
+    st.subheader("📊 Raw Data — Changes as % of Total Orderline Items by Rim")
+    st.markdown(
+        "Upload **Feb_raw.csv** and/or **Mar_raw.csv** via the sidebar uploaders.  "
+        "Each row in those files represents one orderline item; the _Number of changes_ "
+        "column records how many reschedules occurred on that line.  "
+        "For each rim the chart shows what share (%) of the total change volume "
+        "belongs to that rim, so you can compare the rim distribution between months."
+    )
+
+    if feb_raw_df is None and mar_raw_df is None:
+        st.info(
+            "👈 Upload **Feb_raw.csv** and/or **Mar_raw.csv** using the "
+            "**Raw Data Files** uploaders in the sidebar to activate this tab."
+        )
+    else:
+        def _filter_raw(df: pd.DataFrame) -> pd.DataFrame:
+            """Apply rim filter and recompute percentages within the filtered set."""
+            if df is None or df.empty:
+                return pd.DataFrame(
+                    columns=["rim", "n_changes", "n_orderlines",
+                             "pct_changes", "pct_orderlines"]
+                )
+            if selected_rims:
+                df = df[df["rim"].isin([float(r) for r in selected_rims])].copy()
+            if not df.empty:
+                tc = df["n_changes"].sum()
+                to = df["n_orderlines"].sum()
+                df["pct_changes"] = (
+                    (df["n_changes"] / tc * 100).round(2) if tc else 0.0
+                )
+                df["pct_orderlines"] = (
+                    (df["n_orderlines"] / to * 100).round(2) if to else 0.0
+                )
+            return df
+
+        feb_raw_f = _filter_raw(feb_raw_df) if feb_raw_df is not None else None
+        mar_raw_f = _filter_raw(mar_raw_df) if mar_raw_df is not None else None
+
+        # ── KPIs ─────────────────────────────────────────────────────────────
+        krc1, krc2, krc3, krc4 = st.columns(4)
+        if feb_raw_f is not None and not feb_raw_f.empty:
+            krc1.metric("Feb — Total Changes",    f"{int(feb_raw_f['n_changes'].sum()):,}")
+            krc2.metric("Feb — Total Orderlines", f"{int(feb_raw_f['n_orderlines'].sum()):,}")
+        if mar_raw_f is not None and not mar_raw_f.empty:
+            krc3.metric("Mar — Total Changes",    f"{int(mar_raw_f['n_changes'].sum()):,}")
+            krc4.metric("Mar — Total Orderlines", f"{int(mar_raw_f['n_orderlines'].sum()):,}")
+
+        st.markdown("---")
+
+        # ── % of Changes by Rim (per month) ──────────────────────────────────
+        st.markdown("### Changes (%) per Rim — share of total change volume")
+        st.caption(
+            "Formula: (sum of _Number of changes_ for rim R) "
+            "÷ (sum across all rims) × 100"
+        )
+
+        col_l, col_r = st.columns(2)
+        for _raw, _lbl, _color, _col in [
+            (feb_raw_f, "February", COLOR_FEB, col_l),
+            (mar_raw_f, "March",    COLOR_MAR, col_r),
+        ]:
+            if _raw is None or _raw.empty:
+                continue
+            with _col:
+                fig_pct = px.bar(
+                    _raw,
+                    x="rim",
+                    y="pct_changes",
+                    text="pct_changes",
+                    color_discrete_sequence=[_color],
+                    labels={
+                        "rim": "Rim Size (in)",
+                        "pct_changes": "% of Total Changes",
+                    },
+                    title=f"Changes % by Rim — {_lbl}",
+                )
+                fig_pct.update_traces(
+                    texttemplate="%{text:.1f}%", textposition="outside"
+                )
+                fig_pct.update_layout(
+                    xaxis=dict(tickmode="linear"),
+                    yaxis=dict(ticksuffix="%"),
+                    margin=dict(t=50, b=30),
+                )
+                st.plotly_chart(fig_pct, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Feb vs Mar comparison ─────────────────────────────────────────────
+        _have_both_raw = (
+            feb_raw_f is not None and not feb_raw_f.empty
+            and mar_raw_f is not None and not mar_raw_f.empty
+        )
+
+        if _have_both_raw:
+            st.markdown("### Feb vs Mar — Changes % by Rim")
+
+            cmp_raw = pd.merge(
+                feb_raw_f[["rim", "pct_changes", "n_changes", "n_orderlines"]].rename(
+                    columns={
+                        "pct_changes": "feb_pct",
+                        "n_changes": "feb_changes",
+                        "n_orderlines": "feb_orderlines",
+                    }
+                ),
+                mar_raw_f[["rim", "pct_changes", "n_changes", "n_orderlines"]].rename(
+                    columns={
+                        "pct_changes": "mar_pct",
+                        "n_changes": "mar_changes",
+                        "n_orderlines": "mar_orderlines",
+                    }
+                ),
+                on="rim",
+                how="outer",
+            ).sort_values("rim").fillna(0)
+
+            cmp_raw["Δ pct"] = (cmp_raw["mar_pct"] - cmp_raw["feb_pct"]).round(2)
+
+            col_c1, col_c2 = st.columns(2)
+
+            with col_c1:
+                fig_cmp = go.Figure()
+                fig_cmp.add_bar(
+                    x=cmp_raw["rim"],
+                    y=cmp_raw["feb_pct"],
+                    name="February",
+                    marker_color=COLOR_FEB,
+                    text=cmp_raw["feb_pct"].map(lambda v: f"{v:.1f}%"),
+                    textposition="outside",
+                )
+                fig_cmp.add_bar(
+                    x=cmp_raw["rim"],
+                    y=cmp_raw["mar_pct"],
+                    name="March",
+                    marker_color=COLOR_MAR,
+                    text=cmp_raw["mar_pct"].map(lambda v: f"{v:.1f}%"),
+                    textposition="outside",
+                )
+                fig_cmp.update_layout(
+                    barmode="group",
+                    title="Changes % by Rim — Feb vs Mar",
+                    xaxis_title="Rim Size (in)",
+                    yaxis=dict(ticksuffix="%", title="% of Total Changes"),
+                    xaxis=dict(tickmode="linear"),
+                    legend=dict(orientation="h"),
+                    margin=dict(t=50, b=30),
+                )
+                st.plotly_chart(fig_cmp, use_container_width=True)
+
+            with col_c2:
+                delta_colors_raw = [
+                    "#d62728" if v > 0 else ("#2ca02c" if v < 0 else "#7f7f7f")
+                    for v in cmp_raw["Δ pct"].fillna(0)
+                ]
+                fig_delta_raw = go.Figure(
+                    go.Bar(
+                        x=cmp_raw["rim"],
+                        y=cmp_raw["Δ pct"],
+                        marker_color=delta_colors_raw,
+                        text=cmp_raw["Δ pct"].map(
+                            lambda v: f"{v:+.2f}pp" if pd.notna(v) else ""
+                        ),
+                        textposition="outside",
+                    )
+                )
+                fig_delta_raw.update_layout(
+                    title="Δ Changes % (Mar − Feb) by Rim",
+                    xaxis_title="Rim Size (in)",
+                    yaxis=dict(ticksuffix="pp", title="Δ percentage points"),
+                    xaxis=dict(tickmode="linear"),
+                    margin=dict(t=50, b=30),
+                )
+                st.plotly_chart(fig_delta_raw, use_container_width=True)
+
+            st.markdown("---")
+
+            with st.expander("📋 Full Raw Data Summary Table"):
+                st.dataframe(
+                    cmp_raw.rename(
+                        columns={
+                            "rim": "Rim (in)",
+                            "feb_changes": "Feb Changes",
+                            "feb_orderlines": "Feb Orderlines",
+                            "feb_pct": "Feb Changes %",
+                            "mar_changes": "Mar Changes",
+                            "mar_orderlines": "Mar Orderlines",
+                            "mar_pct": "Mar Changes %",
+                            "Δ pct": "Δ % (Mar − Feb)",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        elif feb_raw_f is not None and not feb_raw_f.empty:
+            with st.expander("📋 February Raw Data Summary"):
+                st.dataframe(feb_raw_f, use_container_width=True, hide_index=True)
+
+        elif mar_raw_f is not None and not mar_raw_f.empty:
+            with st.expander("📋 March Raw Data Summary"):
+                st.dataframe(mar_raw_f, use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
