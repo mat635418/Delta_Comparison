@@ -8,8 +8,6 @@ Usage:
     streamlit run app.py
 """
 
-import csv
-import gc
 import io
 import os
 import glob as glob_module
@@ -336,100 +334,6 @@ def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, pd.DataFrame
     return load_csv(content)
 
 
-@st.cache_data(show_spinner="Aggregating raw CSV (memory-safe)…", max_entries=2)
-def load_raw_csv(content: bytes) -> pd.DataFrame:
-    """
-    Load a raw flat-format CSV (e.g. Feb_raw.csv / Mar_raw.csv) in a
-    memory-efficient way.  The file is read in 50 000-row chunks; each
-    chunk is immediately aggregated to a per-rim summary and discarded,
-    so peak RAM stays well below the 512 MB service limit even for 50 MB
-    inputs.
-
-    Rows where *Number of changes* is missing or non-numeric are counted as
-    1 change (same conservative default used in the pivot-table loader).
-
-    Returns a small DataFrame with columns:
-        rim, n_changes, n_orderlines, pct_changes, pct_orderlines
-    """
-    _EMPTY_RESULT = pd.DataFrame(
-        columns=["rim", "n_changes", "n_orderlines", "pct_changes", "pct_orderlines"]
-    )
-
-    # Detect separator with csv.Sniffer for reliability
-    sample = content[:4096].decode("utf-8", errors="replace")
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-        sep = dialect.delimiter
-    except csv.Error:
-        sep = ","
-
-    buf = io.BytesIO(content)
-    header_df = pd.read_csv(buf, sep=sep, nrows=0)
-    buf.seek(0)
-    cols = header_df.columns.tolist()
-
-    # Fuzzy-locate the rim-diameter and number-of-changes columns
-    rim_col = next(
-        (c for c in cols if "rim" in c.lower() and "inch" in c.lower()), None
-    ) or next((c for c in cols if "rim" in c.lower()), None)
-
-    changes_col = next(
-        (c for c in cols if "number" in c.lower() and "change" in c.lower()), None
-    ) or next((c for c in cols if "change" in c.lower()), None)
-
-    if not rim_col or not changes_col:
-        return _EMPTY_RESULT
-
-    parts: list[pd.DataFrame] = []
-    for chunk in pd.read_csv(
-        buf,
-        sep=sep,
-        usecols=[rim_col, changes_col],
-        dtype={rim_col: "float32", changes_col: "float32"},
-        chunksize=50_000,
-        low_memory=True,
-    ):
-        chunk = chunk.rename(columns={rim_col: "rim", changes_col: "n_changes"})
-        # Rows without a valid change count are treated as 1 change each
-        chunk["n_changes"] = pd.to_numeric(chunk["n_changes"], errors="coerce").fillna(1)
-        chunk["rim"] = pd.to_numeric(chunk["rim"], errors="coerce")
-        part = (
-            chunk.dropna(subset=["rim"])
-            .groupby("rim")
-            .agg(n_changes=("n_changes", "sum"), n_orderlines=("rim", "count"))
-            .reset_index()
-        )
-        parts.append(part)
-
-    gc.collect()
-
-    if not parts:
-        return _EMPTY_RESULT
-
-    result = (
-        pd.concat(parts, ignore_index=True)
-        .groupby("rim")
-        .agg(n_changes=("n_changes", "sum"), n_orderlines=("n_orderlines", "sum"))
-        .reset_index()
-        .sort_values("rim")
-    )
-
-    total_changes = result["n_changes"].sum()
-    total_orderlines = result["n_orderlines"].sum()
-
-    result["pct_changes"] = (
-        (result["n_changes"] / total_changes * 100).round(2)
-        if total_changes
-        else pd.Series(0.0, index=result.index)
-    )
-    result["pct_orderlines"] = (
-        (result["n_orderlines"] / total_orderlines * 100).round(2)
-        if total_orderlines
-        else pd.Series(0.0, index=result.index)
-    )
-    return result
-
-
 def filter_rims(df: pd.DataFrame, rims: list[int]) -> pd.DataFrame:
     if "rim" in df.columns and rims:
         return df[df["rim"].isin(rims)]
@@ -732,20 +636,6 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("🔬 Raw Data Files")
-    st.caption(
-        "Upload 50 MB flat exports (Feb_raw.csv / Mar_raw.csv) for refined "
-        "rim-level analysis.  Files are aggregated on load — only a small "
-        "summary is kept in memory."
-    )
-    feb_raw_upload = st.file_uploader(
-        "Upload February raw file", type=["csv"], key="feb_raw_up"
-    )
-    mar_raw_upload = st.file_uploader(
-        "Upload March raw file", type=["csv"], key="mar_raw_up"
-    )
-
-    st.markdown("---")
     st.subheader("🔧 Global Filters")
 
     # Rim selector — populated after data loads
@@ -783,14 +673,6 @@ if mar_upload:
     mar_fname = mar_upload.name
     mar_name = mar_upload.name
 
-# ── Raw files (uploaded only; not loaded from root) ───────────────────────────
-feb_raw_bytes: bytes | None = None
-mar_raw_bytes: bytes | None = None
-if feb_raw_upload:
-    feb_raw_bytes = feb_raw_upload.read()
-if mar_raw_upload:
-    mar_raw_bytes = mar_raw_upload.read()
-
 feb_df: pd.DataFrame | None = None
 mar_df: pd.DataFrame | None = None
 feb_qty_df: pd.DataFrame | None = None
@@ -803,21 +685,6 @@ if feb_bytes:
 if mar_bytes:
     with st.spinner("Loading March file…"):
         mar_df, mar_qty_df, _ = load_file(mar_bytes, mar_fname)
-
-feb_raw_df: pd.DataFrame | None = None
-mar_raw_df: pd.DataFrame | None = None
-
-if feb_raw_bytes:
-    with st.spinner("Aggregating February raw file…"):
-        feb_raw_df = load_raw_csv(feb_raw_bytes)
-    if feb_raw_df.empty:
-        st.sidebar.warning("⚠️ Feb raw file: could not detect rim/changes columns.")
-
-if mar_raw_bytes:
-    with st.spinner("Aggregating March raw file…"):
-        mar_raw_df = load_raw_csv(mar_raw_bytes)
-    if mar_raw_df.empty:
-        st.sidebar.warning("⚠️ Mar raw file: could not detect rim/changes columns.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIM FILTER (sidebar)
@@ -862,7 +729,7 @@ if feb_df is None and mar_df is None:
     )
     st.stop()
 
-tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals", "📊 Raw: Changes % by Rim"])
+tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals", "📊 Changes per Orderline"])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 0 – FEB vs MARCH COMPARISON
