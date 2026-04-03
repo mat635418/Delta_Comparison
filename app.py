@@ -8,8 +8,6 @@ Usage:
     streamlit run app.py
 """
 
-import csv
-import gc
 import io
 import os
 import glob as glob_module
@@ -57,6 +55,33 @@ st.markdown(
 # ─────────────────────────────────────────────────────────────────────────────
 COLOR_FEB = "#1f77b4"
 COLOR_MAR = "#ff7f0e"
+HIGHLIGHT_RIM = 15           # primary rim of interest
+COLOR_HIGHLIGHT = "#FFD700"  # gold – used to mark rim=15 bars
+_HL_ROW_STYLE = "background-color: #fff3cd; font-weight: bold"  # amber row highlight
+
+
+def _add_rim15_vrect(fig: "go.Figure") -> "go.Figure":
+    """Overlay a translucent gold rectangle behind the rim-15 column in any bar chart."""
+    fig.add_vrect(
+        x0=14.4, x1=15.6,
+        fillcolor=COLOR_HIGHLIGHT, opacity=0.15,
+        layer="below", line_width=0,
+    )
+    return fig
+
+
+def _style_rim15(df: "pd.DataFrame") -> "pd.io.formats.style.Styler":
+    """Return a Styler that highlights the rim=HIGHLIGHT_RIM row in amber."""
+    rim_col = next((c for c in ["rim", "Rim (in)", "Rim"] if c in df.columns), None)
+
+    def _apply(row):
+        try:
+            is_target = rim_col is not None and int(row[rim_col]) == HIGHLIGHT_RIM
+        except (ValueError, TypeError):
+            is_target = False
+        return [_HL_ROW_STYLE if is_target else "" for _ in row]
+
+    return df.style.apply(_apply, axis=1)
 
 # Candidate default CSV filenames (case-insensitive glob)
 DEFAULT_FEB_PATTERNS = ["Feb.csv", "*[Ff]eb*.csv"]
@@ -334,100 +359,6 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
 def load_file(content: bytes, filename: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """Load a CSV file, returning (detail_df, qty_group_df, labels)."""
     return load_csv(content)
-
-
-@st.cache_data(show_spinner="Aggregating raw CSV (memory-safe)…", max_entries=2)
-def load_raw_csv(content: bytes) -> pd.DataFrame:
-    """
-    Load a raw flat-format CSV (e.g. Feb_raw.csv / Mar_raw.csv) in a
-    memory-efficient way.  The file is read in 50 000-row chunks; each
-    chunk is immediately aggregated to a per-rim summary and discarded,
-    so peak RAM stays well below the 512 MB service limit even for 50 MB
-    inputs.
-
-    Rows where *Number of changes* is missing or non-numeric are counted as
-    1 change (same conservative default used in the pivot-table loader).
-
-    Returns a small DataFrame with columns:
-        rim, n_changes, n_orderlines, pct_changes, pct_orderlines
-    """
-    _EMPTY_RESULT = pd.DataFrame(
-        columns=["rim", "n_changes", "n_orderlines", "pct_changes", "pct_orderlines"]
-    )
-
-    # Detect separator with csv.Sniffer for reliability
-    sample = content[:4096].decode("utf-8", errors="replace")
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-        sep = dialect.delimiter
-    except csv.Error:
-        sep = ","
-
-    buf = io.BytesIO(content)
-    header_df = pd.read_csv(buf, sep=sep, nrows=0)
-    buf.seek(0)
-    cols = header_df.columns.tolist()
-
-    # Fuzzy-locate the rim-diameter and number-of-changes columns
-    rim_col = next(
-        (c for c in cols if "rim" in c.lower() and "inch" in c.lower()), None
-    ) or next((c for c in cols if "rim" in c.lower()), None)
-
-    changes_col = next(
-        (c for c in cols if "number" in c.lower() and "change" in c.lower()), None
-    ) or next((c for c in cols if "change" in c.lower()), None)
-
-    if not rim_col or not changes_col:
-        return _EMPTY_RESULT
-
-    parts: list[pd.DataFrame] = []
-    for chunk in pd.read_csv(
-        buf,
-        sep=sep,
-        usecols=[rim_col, changes_col],
-        dtype={rim_col: "float32", changes_col: "float32"},
-        chunksize=50_000,
-        low_memory=True,
-    ):
-        chunk = chunk.rename(columns={rim_col: "rim", changes_col: "n_changes"})
-        # Rows without a valid change count are treated as 1 change each
-        chunk["n_changes"] = pd.to_numeric(chunk["n_changes"], errors="coerce").fillna(1)
-        chunk["rim"] = pd.to_numeric(chunk["rim"], errors="coerce")
-        part = (
-            chunk.dropna(subset=["rim"])
-            .groupby("rim")
-            .agg(n_changes=("n_changes", "sum"), n_orderlines=("rim", "count"))
-            .reset_index()
-        )
-        parts.append(part)
-
-    gc.collect()
-
-    if not parts:
-        return _EMPTY_RESULT
-
-    result = (
-        pd.concat(parts, ignore_index=True)
-        .groupby("rim")
-        .agg(n_changes=("n_changes", "sum"), n_orderlines=("n_orderlines", "sum"))
-        .reset_index()
-        .sort_values("rim")
-    )
-
-    total_changes = result["n_changes"].sum()
-    total_orderlines = result["n_orderlines"].sum()
-
-    result["pct_changes"] = (
-        (result["n_changes"] / total_changes * 100).round(2)
-        if total_changes
-        else pd.Series(0.0, index=result.index)
-    )
-    result["pct_orderlines"] = (
-        (result["n_orderlines"] / total_orderlines * 100).round(2)
-        if total_orderlines
-        else pd.Series(0.0, index=result.index)
-    )
-    return result
 
 
 def filter_rims(df: pd.DataFrame, rims: list[int]) -> pd.DataFrame:
@@ -732,20 +663,6 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("🔬 Raw Data Files")
-    st.caption(
-        "Upload 50 MB flat exports (Feb_raw.csv / Mar_raw.csv) for refined "
-        "rim-level analysis.  Files are aggregated on load — only a small "
-        "summary is kept in memory."
-    )
-    feb_raw_upload = st.file_uploader(
-        "Upload February raw file", type=["csv"], key="feb_raw_up"
-    )
-    mar_raw_upload = st.file_uploader(
-        "Upload March raw file", type=["csv"], key="mar_raw_up"
-    )
-
-    st.markdown("---")
     st.subheader("🔧 Global Filters")
 
     # Rim selector — populated after data loads
@@ -783,14 +700,6 @@ if mar_upload:
     mar_fname = mar_upload.name
     mar_name = mar_upload.name
 
-# ── Raw files (uploaded only; not loaded from root) ───────────────────────────
-feb_raw_bytes: bytes | None = None
-mar_raw_bytes: bytes | None = None
-if feb_raw_upload:
-    feb_raw_bytes = feb_raw_upload.read()
-if mar_raw_upload:
-    mar_raw_bytes = mar_raw_upload.read()
-
 feb_df: pd.DataFrame | None = None
 mar_df: pd.DataFrame | None = None
 feb_qty_df: pd.DataFrame | None = None
@@ -803,21 +712,6 @@ if feb_bytes:
 if mar_bytes:
     with st.spinner("Loading March file…"):
         mar_df, mar_qty_df, _ = load_file(mar_bytes, mar_fname)
-
-feb_raw_df: pd.DataFrame | None = None
-mar_raw_df: pd.DataFrame | None = None
-
-if feb_raw_bytes:
-    with st.spinner("Aggregating February raw file…"):
-        feb_raw_df = load_raw_csv(feb_raw_bytes)
-    if feb_raw_df.empty:
-        st.sidebar.warning("⚠️ Feb raw file: could not detect rim/changes columns.")
-
-if mar_raw_bytes:
-    with st.spinner("Aggregating March raw file…"):
-        mar_raw_df = load_raw_csv(mar_raw_bytes)
-    if mar_raw_df.empty:
-        st.sidebar.warning("⚠️ Mar raw file: could not detect rim/changes columns.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIM FILTER (sidebar)
@@ -862,7 +756,7 @@ if feb_df is None and mar_df is None:
     )
     st.stop()
 
-tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals", "📊 Raw: Changes % by Rim"])
+tabs = st.tabs(["⚖️ Feb vs March", "📅 Earlier vs Later Date", "📦 Change Intervals", "📊 Changes per Orderline"])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 0 – FEB vs MARCH COMPARISON
@@ -904,6 +798,7 @@ with tabs[0]:
                 legend=dict(orientation="h"),
                 margin=dict(t=50, b=30),
             )
+            _add_rim15_vrect(fig_side)
             st.plotly_chart(fig_side, use_container_width=True)
 
         with col_r:
@@ -927,17 +822,20 @@ with tabs[0]:
                 xaxis=dict(tickmode="linear"),
                 margin=dict(t=50, b=30),
             )
+            _add_rim15_vrect(fig_delta)
             st.plotly_chart(fig_delta, use_container_width=True)
 
         st.dataframe(
-            cmp.rename(
-                columns={
-                    "rim": "Rim (in)",
-                    "Feb": "Feb Changes",
-                    "Mar": "Mar Changes",
-                    "Δ abs": "Δ (absolute)",
-                    "Δ %": "Δ (%)",
-                }
+            _style_rim15(
+                cmp.rename(
+                    columns={
+                        "rim": "Rim (in)",
+                        "Feb": "Feb Changes",
+                        "Mar": "Mar Changes",
+                        "Δ abs": "Δ (absolute)",
+                        "Δ %": "Δ (%)",
+                    }
+                )
             ),
             use_container_width=True,
             hide_index=True,
@@ -1093,6 +991,7 @@ with tabs[1]:
                     legend=dict(orientation="h"),
                     margin=dict(t=50, b=40),
                 )
+                _add_rim15_vrect(fig)
                 st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
@@ -1130,11 +1029,8 @@ with tabs[1]:
                     legend=dict(orientation="h"),
                     margin=dict(t=50, b=40),
                 )
+                _add_rim15_vrect(fig_pct)
                 st.plotly_chart(fig_pct, use_container_width=True)
-
-        st.markdown("---")
-
-        # ── Feb vs Mar comparison by direction ───────────────────────────────
         if not feb_el.empty and not mar_el.empty:
             st.markdown("### Feb vs Mar — Earlier Changes by Rim")
             cmp_el = pd.merge(
@@ -1164,6 +1060,7 @@ with tabs[1]:
                     xaxis=dict(tickmode="linear"),
                     legend=dict(orientation="h"), margin=dict(t=50, b=30),
                 )
+                _add_rim15_vrect(fig_e)
                 st.plotly_chart(fig_e, use_container_width=True)
 
             with col_c2:
@@ -1179,6 +1076,7 @@ with tabs[1]:
                     xaxis=dict(tickmode="linear"),
                     legend=dict(orientation="h"), margin=dict(t=50, b=30),
                 )
+                _add_rim15_vrect(fig_l)
                 st.plotly_chart(fig_l, use_container_width=True)
 
             # ── % Earlier shift: how much did the earlier% change Feb→Mar? ──
@@ -1200,6 +1098,7 @@ with tabs[1]:
                 xaxis_title="Rim (in)", yaxis_title="Δ percentage points",
                 xaxis=dict(tickmode="linear"), margin=dict(t=50, b=30),
             )
+            _add_rim15_vrect(fig_shift)
             st.plotly_chart(fig_shift, use_container_width=True)
 
             st.markdown("---")
@@ -1212,12 +1111,14 @@ with tabs[1]:
                 tbl["Feb Earlier %"] = tbl["feb_epct"].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "")
                 tbl["Mar Earlier %"] = tbl["mar_epct"].map(lambda v: f"{v:.1f}%" if pd.notna(v) else "")
                 st.dataframe(
-                    tbl[["rim", "feb_earlier", "feb_later", "mar_earlier", "mar_later",
-                          "Δ Earlier", "Δ Later", "Feb Earlier %", "Mar Earlier %"]].rename(columns={
-                        "rim": "Rim (in)",
-                        "feb_earlier": "Feb Earlier", "feb_later": "Feb Later",
-                        "mar_earlier": "Mar Earlier", "mar_later": "Mar Later",
-                    }),
+                    _style_rim15(
+                        tbl[["rim", "feb_earlier", "feb_later", "mar_earlier", "mar_later",
+                              "Δ Earlier", "Δ Later", "Feb Earlier %", "Mar Earlier %"]].rename(columns={
+                            "rim": "Rim (in)",
+                            "feb_earlier": "Feb Earlier", "feb_later": "Feb Later",
+                            "mar_earlier": "Mar Earlier", "mar_later": "Mar Later",
+                        })
+                    ),
                     use_container_width=True, hide_index=True,
                 )
 
@@ -1295,6 +1196,7 @@ with tabs[2]:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
                     margin=dict(t=70, b=30),
                 )
+                _add_rim15_vrect(fig_st)
                 st.plotly_chart(fig_st, use_container_width=True)
 
         st.markdown("---")
@@ -1347,6 +1249,7 @@ with tabs[2]:
                         legend=dict(orientation="h"),
                         margin=dict(t=55, b=30),
                     )
+                    _add_rim15_vrect(fig_g)
                     st.plotly_chart(fig_g, use_container_width=True)
 
         st.markdown("---")
@@ -1389,6 +1292,19 @@ with tabs[2]:
                 margin=dict(t=40, b=30),
                 height=300,
             )
+            # Highlight the rim=15 column
+            _heat_cols = [str(int(c)) + '"' for c in pivot_heat.columns]
+            if f'{HIGHLIGHT_RIM}"' in _heat_cols:
+                _ix15 = _heat_cols.index(f'{HIGHLIGHT_RIM}"')
+                fig_heat.add_shape(
+                    type="rect",
+                    xref="x", yref="y",
+                    x0=_ix15 - 0.5, x1=_ix15 + 0.5,
+                    y0=-0.5, y1=len(pivot_heat.index) - 0.5,
+                    fillcolor=COLOR_HIGHLIGHT, opacity=0.18,
+                    layer="below",
+                    line=dict(color="#b8860b", width=2),
+                )
             st.plotly_chart(fig_heat, use_container_width=True)
 
         # ── Summary table ─────────────────────────────────────────────────────
@@ -1413,218 +1329,228 @@ with tabs[2]:
                     f"{m} Rim {int(r)}\"" if m and str(r).strip() else str(r)
                     for m, r in pivot_tbl.columns
                 ]
-                st.dataframe(pivot_tbl, use_container_width=True, hide_index=True)
+                # Highlight rim=15 columns
+                _rim15_cols = [c for c in pivot_tbl.columns if f"{HIGHLIGHT_RIM}\"" in str(c)]
+
+                def _style_rim15_cols(df):
+                    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+                    for c in _rim15_cols:
+                        if c in styles.columns:
+                            styles[c] = _HL_ROW_STYLE
+                    return styles
+
+                _tbl_styler = pivot_tbl.style.apply(_style_rim15_cols, axis=None)
+                st.dataframe(_tbl_styler, use_container_width=True, hide_index=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 – RAW DATA: CHANGES % BY RIM
+# TAB 3 – CHANGES PER ORDERLINE ITEM (Excel-style pivot)
 # ═════════════════════════════════════════════════════════════════════════════
 with tabs[3]:
-    st.subheader("📊 Raw Data — Changes as % of Total Orderline Items by Rim")
-    st.markdown(
-        "Upload **Feb_raw.csv** and/or **Mar_raw.csv** via the sidebar uploaders.  "
-        "Each row in those files represents one orderline item; the _Number of changes_ "
-        "column records how many reschedules occurred on that line.  "
-        "For each rim the chart shows what share (%) of the total change volume "
-        "belongs to that rim, so you can compare the rim distribution between months."
-    )
+    st.subheader("📊 Changes per Orderline Item — Feb vs Mar")
 
-    if feb_raw_df is None and mar_raw_df is None:
+    _need_cols = {"n_changes", "n_orders", "earlier_changes", "later_changes"}
+
+    def _ol_summary(df: pd.DataFrame) -> pd.DataFrame:
+        """Per-rim summary: changes per orderline, % to earlier/later date."""
+        if df is None or not _need_cols.issubset(df.columns):
+            return pd.DataFrame()
+        g = (
+            df.groupby("rim")
+            .agg(
+                n_changes=("n_changes", "sum"),
+                n_orders=("n_orders", "sum"),
+                earlier=("earlier_changes", "sum"),
+                later=("later_changes", "sum"),
+            )
+            .reset_index()
+            .sort_values("rim")
+        )
+        g["changes_per_ol"] = (g["n_changes"] / g["n_orders"].replace(0, np.nan)).round(2)
+        g["pct_earlier"] = (g["earlier"] / g["n_changes"].replace(0, np.nan) * 100).round(0).fillna(0)
+        g["pct_later"]   = (g["later"]   / g["n_changes"].replace(0, np.nan) * 100).round(0).fillna(0)
+        return g
+
+    feb_ol = _ol_summary(feb_df_f)
+    mar_ol = _ol_summary(mar_df_f)
+
+    _has_feb_ol = not feb_ol.empty
+    _has_mar_ol = not mar_ol.empty
+
+    if not _has_feb_ol and not _has_mar_ol:
         st.info(
-            "👈 Upload **Feb_raw.csv** and/or **Mar_raw.csv** using the "
-            "**Raw Data Files** uploaders in the sidebar to activate this tab."
+            "No data available. Please load CSV files that contain "
+            "_Count of Changes_, _Count of Order_Line_Number_, "
+            "_Changes on Earlier Date_ and _Changes on Later Date_ columns."
         )
     else:
-        def _filter_raw(df: pd.DataFrame) -> pd.DataFrame:
-            """Apply rim filter and recompute percentages within the filtered set."""
-            if df is None or df.empty:
-                return pd.DataFrame(
-                    columns=["rim", "n_changes", "n_orderlines",
-                             "pct_changes", "pct_orderlines"]
-                )
-            if selected_rims:
-                df = df[df["rim"].isin([float(r) for r in selected_rims])].copy()
-            if not df.empty:
-                tc = df["n_changes"].sum()
-                to = df["n_orderlines"].sum()
-                df["pct_changes"] = (
-                    (df["n_changes"] / tc * 100).round(2)
-                    if tc
-                    else pd.Series(0.0, index=df.index)
-                )
-                df["pct_orderlines"] = (
-                    (df["n_orderlines"] / to * 100).round(2)
-                    if to
-                    else pd.Series(0.0, index=df.index)
-                )
-            return df
-
-        feb_raw_f = _filter_raw(feb_raw_df) if feb_raw_df is not None else None
-        mar_raw_f = _filter_raw(mar_raw_df) if mar_raw_df is not None else None
-
-        # ── KPIs ─────────────────────────────────────────────────────────────
-        krc1, krc2, krc3, krc4 = st.columns(4)
-        if feb_raw_f is not None and not feb_raw_f.empty:
-            krc1.metric("Feb — Total Changes",    f"{int(feb_raw_f['n_changes'].sum()):,}")
-            krc2.metric("Feb — Total Orderlines", f"{int(feb_raw_f['n_orderlines'].sum()):,}")
-        if mar_raw_f is not None and not mar_raw_f.empty:
-            krc3.metric("Mar — Total Changes",    f"{int(mar_raw_f['n_changes'].sum()):,}")
-            krc4.metric("Mar — Total Orderlines", f"{int(mar_raw_f['n_orderlines'].sum()):,}")
-
-        st.markdown("---")
-
-        # ── % of Changes by Rim (per month) ──────────────────────────────────
-        st.markdown("### Changes (%) per Rim — share of total change volume")
-        st.caption(
-            "Formula: (sum of _Number of changes_ for rim R) "
-            "÷ (sum across all rims) × 100"
-        )
-
-        col_l, col_r = st.columns(2)
-        for _raw, _lbl, _color, _col in [
-            (feb_raw_f, "February", COLOR_FEB, col_l),
-            (mar_raw_f, "March",    COLOR_MAR, col_r),
-        ]:
-            if _raw is None or _raw.empty:
-                continue
-            with _col:
-                fig_pct = px.bar(
-                    _raw,
-                    x="rim",
-                    y="pct_changes",
-                    text="pct_changes",
-                    color_discrete_sequence=[_color],
-                    labels={
-                        "rim": "Rim Size (in)",
-                        "pct_changes": "% of Total Changes",
-                    },
-                    title=f"Changes % by Rim — {_lbl}",
-                )
-                fig_pct.update_traces(
-                    texttemplate="%{text:.1f}%", textposition="outside"
-                )
-                fig_pct.update_layout(
-                    xaxis=dict(tickmode="linear"),
-                    yaxis=dict(ticksuffix="%"),
-                    margin=dict(t=50, b=30),
-                )
-                st.plotly_chart(fig_pct, use_container_width=True)
-
-        st.markdown("---")
-
-        # ── Feb vs Mar comparison ─────────────────────────────────────────────
-        _have_both_raw = (
-            feb_raw_f is not None and not feb_raw_f.empty
-            and mar_raw_f is not None and not mar_raw_f.empty
-        )
-
-        if _have_both_raw:
-            st.markdown("### Feb vs Mar — Changes % by Rim")
-
-            cmp_raw = pd.merge(
-                feb_raw_f[["rim", "pct_changes", "n_changes", "n_orderlines"]].rename(
-                    columns={
-                        "pct_changes": "feb_pct",
-                        "n_changes": "feb_changes",
-                        "n_orderlines": "feb_orderlines",
-                    }
+        # ── Changes per orderline comparison chart ─────────────────────────
+        st.markdown("### Changes per Orderline Item — Feb vs Mar")
+        if _has_feb_ol and _has_mar_ol:
+            cmp_ol = pd.merge(
+                feb_ol[["rim", "changes_per_ol", "pct_earlier", "pct_later"]].rename(
+                    columns={"changes_per_ol": "feb_cpo",
+                             "pct_earlier": "feb_pe", "pct_later": "feb_pl"}
                 ),
-                mar_raw_f[["rim", "pct_changes", "n_changes", "n_orderlines"]].rename(
-                    columns={
-                        "pct_changes": "mar_pct",
-                        "n_changes": "mar_changes",
-                        "n_orderlines": "mar_orderlines",
-                    }
+                mar_ol[["rim", "changes_per_ol", "pct_earlier", "pct_later"]].rename(
+                    columns={"changes_per_ol": "mar_cpo",
+                             "pct_earlier": "mar_pe", "pct_later": "mar_pl"}
                 ),
-                on="rim",
-                how="outer",
+                on="rim", how="outer",
             ).sort_values("rim").fillna(0)
 
-            cmp_raw["Δ pct"] = (cmp_raw["mar_pct"] - cmp_raw["feb_pct"]).round(2)
+            cmp_ol["delta_cpo"] = (cmp_ol["mar_cpo"] - cmp_ol["feb_cpo"]).round(2)
+            cmp_ol["delta_pct"] = (
+                (cmp_ol["mar_cpo"] - cmp_ol["feb_cpo"])
+                / cmp_ol["feb_cpo"].replace(0, np.nan) * 100
+            ).round(0).fillna(0)
+            cmp_ol["delta_pe"] = (cmp_ol["mar_pe"] - cmp_ol["feb_pe"]).round(0)
+            cmp_ol["delta_pl"] = (cmp_ol["mar_pl"] - cmp_ol["feb_pl"]).round(0)
 
-            col_c1, col_c2 = st.columns(2)
+        elif _has_feb_ol:
+            cmp_ol = feb_ol[["rim", "changes_per_ol", "pct_earlier", "pct_later"]].rename(
+                columns={"changes_per_ol": "feb_cpo",
+                         "pct_earlier": "feb_pe", "pct_later": "feb_pl"}
+            ).assign(mar_cpo=None, mar_pe=None, mar_pl=None,
+                     delta_cpo=None, delta_pct=None, delta_pe=None, delta_pl=None)
+        else:
+            cmp_ol = mar_ol[["rim", "changes_per_ol", "pct_earlier", "pct_later"]].rename(
+                columns={"changes_per_ol": "mar_cpo",
+                         "pct_earlier": "mar_pe", "pct_later": "mar_pl"}
+            ).assign(feb_cpo=None, feb_pe=None, feb_pl=None,
+                     delta_cpo=None, delta_pct=None, delta_pe=None, delta_pl=None)
 
-            with col_c1:
-                fig_cmp = go.Figure()
-                fig_cmp.add_bar(
-                    x=cmp_raw["rim"],
-                    y=cmp_raw["feb_pct"],
-                    name="February",
-                    marker_color=COLOR_FEB,
-                    text=cmp_raw["feb_pct"].map(lambda v: f"{v:.1f}%"),
+        # Grouped bar chart: changes per orderline by rim
+        col_ol1, col_ol2 = st.columns(2)
+        with col_ol1:
+            fig_ol = go.Figure()
+            if _has_feb_ol:
+                fig_ol.add_bar(
+                    x=feb_ol["rim"], y=feb_ol["changes_per_ol"],
+                    name="February", marker_color=COLOR_FEB,
+                    text=feb_ol["changes_per_ol"].map(lambda v: f"{v:.2f}"),
                     textposition="outside",
                 )
-                fig_cmp.add_bar(
-                    x=cmp_raw["rim"],
-                    y=cmp_raw["mar_pct"],
-                    name="March",
-                    marker_color=COLOR_MAR,
-                    text=cmp_raw["mar_pct"].map(lambda v: f"{v:.1f}%"),
+            if _has_mar_ol:
+                fig_ol.add_bar(
+                    x=mar_ol["rim"], y=mar_ol["changes_per_ol"],
+                    name="March", marker_color=COLOR_MAR,
+                    text=mar_ol["changes_per_ol"].map(lambda v: f"{v:.2f}"),
                     textposition="outside",
                 )
-                fig_cmp.update_layout(
-                    barmode="group",
-                    title="Changes % by Rim — Feb vs Mar",
-                    xaxis_title="Rim Size (in)",
-                    yaxis=dict(ticksuffix="%", title="% of Total Changes"),
-                    xaxis=dict(tickmode="linear"),
-                    legend=dict(orientation="h"),
-                    margin=dict(t=50, b=30),
-                )
-                st.plotly_chart(fig_cmp, use_container_width=True)
+            fig_ol.update_layout(
+                barmode="group",
+                title="Changes per Orderline Item by Rim",
+                xaxis_title="Rim (in)", yaxis_title="Changes / Orderline",
+                xaxis=dict(tickmode="linear"),
+                legend=dict(orientation="h"),
+                margin=dict(t=50, b=30),
+            )
+            _add_rim15_vrect(fig_ol)
+            st.plotly_chart(fig_ol, use_container_width=True)
 
-            with col_c2:
-                delta_colors_raw = [
+        with col_ol2:
+            if _has_feb_ol and _has_mar_ol:
+                _delta_ol_colors = [
                     "#d62728" if v > 0 else ("#2ca02c" if v < 0 else "#7f7f7f")
-                    for v in cmp_raw["Δ pct"].fillna(0)
+                    for v in cmp_ol["delta_pct"].fillna(0)
                 ]
-                fig_delta_raw = go.Figure(
-                    go.Bar(
-                        x=cmp_raw["rim"],
-                        y=cmp_raw["Δ pct"],
-                        marker_color=delta_colors_raw,
-                        text=cmp_raw["Δ pct"].map(
-                            lambda v: f"{v:+.2f}pp" if pd.notna(v) else ""
-                        ),
-                        textposition="outside",
-                    )
-                )
-                fig_delta_raw.update_layout(
-                    title="Δ Changes % (Mar − Feb) by Rim",
-                    xaxis_title="Rim Size (in)",
-                    yaxis=dict(ticksuffix="pp", title="Δ percentage points"),
+                fig_ol_delta = go.Figure(go.Bar(
+                    x=cmp_ol["rim"],
+                    y=cmp_ol["delta_pct"],
+                    marker_color=_delta_ol_colors,
+                    text=cmp_ol["delta_pct"].map(
+                        lambda v: f"{int(v):+}%" if pd.notna(v) else ""
+                    ),
+                    textposition="outside",
+                ))
+                fig_ol_delta.update_layout(
+                    title="Δ Changes per Orderline (Mar − Feb) % — 🟢 fewer · 🔴 more",
+                    xaxis_title="Rim (in)", yaxis_title="Δ %",
                     xaxis=dict(tickmode="linear"),
                     margin=dict(t=50, b=30),
                 )
-                st.plotly_chart(fig_delta_raw, use_container_width=True)
+                _add_rim15_vrect(fig_ol_delta)
+                st.plotly_chart(fig_ol_delta, use_container_width=True)
 
-            st.markdown("---")
+        st.markdown("---")
 
-            with st.expander("📋 Full Raw Data Summary Table"):
-                st.dataframe(
-                    cmp_raw.rename(
-                        columns={
-                            "rim": "Rim (in)",
-                            "feb_changes": "Feb Changes",
-                            "feb_orderlines": "Feb Orderlines",
-                            "feb_pct": "Feb Changes %",
-                            "mar_changes": "Mar Changes",
-                            "mar_orderlines": "Mar Orderlines",
-                            "mar_pct": "Mar Changes %",
-                            "Δ pct": "Δ % (Mar − Feb)",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+        # ── Excel-style pivot table ────────────────────────────────────────
+        st.markdown("### MARCH | FEB | DELTA COMPARISON Mar vs. Feb")
 
-        elif feb_raw_f is not None and not feb_raw_f.empty:
-            with st.expander("📋 February Raw Data Summary"):
-                st.dataframe(feb_raw_f, use_container_width=True, hide_index=True)
+        # Build display table
+        disp_rows = []
+        all_rims = sorted(
+            set(feb_ol["rim"].tolist() if _has_feb_ol else [])
+            | set(mar_ol["rim"].tolist() if _has_mar_ol else [])
+        )
+        for rim_val in all_rims:
+            row: dict = {"Rim": int(rim_val)}
+            if _has_mar_ol:
+                r_mar = mar_ol[mar_ol["rim"] == rim_val]
+                if not r_mar.empty:
+                    row["Mar: changes/ol"] = float(r_mar["changes_per_ol"].iloc[0])
+                    _pe = r_mar["pct_earlier"].iloc[0]
+                    _pl = r_mar["pct_later"].iloc[0]
+                    row["Mar: % earlier"] = f"{int(_pe)}%" if pd.notna(_pe) else "—"
+                    row["Mar: % later"]   = f"{int(_pl)}%" if pd.notna(_pl) else "—"
+            if _has_feb_ol:
+                r_feb = feb_ol[feb_ol["rim"] == rim_val]
+                if not r_feb.empty:
+                    row["Feb: changes/ol"] = float(r_feb["changes_per_ol"].iloc[0])
+                    _pe = r_feb["pct_earlier"].iloc[0]
+                    _pl = r_feb["pct_later"].iloc[0]
+                    row["Feb: % earlier"] = f"{int(_pe)}%" if pd.notna(_pe) else "—"
+                    row["Feb: % later"]   = f"{int(_pl)}%" if pd.notna(_pl) else "—"
+            if _has_feb_ol and _has_mar_ol:
+                r_c = cmp_ol[cmp_ol["rim"] == rim_val]
+                if not r_c.empty:
+                    row["Δ changes/ol"] = float(r_c["delta_cpo"].iloc[0])
+                    _dp  = r_c["delta_pct"].iloc[0]
+                    _dpe = r_c["delta_pe"].iloc[0]
+                    _dpl = r_c["delta_pl"].iloc[0]
+                    row["Δ %"]         = int(_dp)  if pd.notna(_dp)  else 0
+                    row["Δ % earlier"] = f"{int(_dpe):+}%" if pd.notna(_dpe) else "—"
+                    row["Δ % later"]   = f"{int(_dpl):+}%" if pd.notna(_dpl) else "—"
+            disp_rows.append(row)
 
-        elif mar_raw_f is not None and not mar_raw_f.empty:
-            with st.expander("📋 March Raw Data Summary"):
-                st.dataframe(mar_raw_f, use_container_width=True, hide_index=True)
+        disp_df = pd.DataFrame(disp_rows)
+
+        # Style: color Δ% cell (red=more changes/worse, green=fewer/better)
+        # and highlight the rim=15 row in amber
+        def _style_pivot(row):
+            styles = []
+            try:
+                is_15 = int(row["Rim"]) == HIGHLIGHT_RIM
+            except (ValueError, TypeError):
+                is_15 = False
+            for col in row.index:
+                cell_styles = []
+                if is_15 and col != "Δ %":
+                    cell_styles.append(_HL_ROW_STYLE)
+                if col == "Δ %":
+                    try:
+                        v = int(row["Δ %"])
+                        bg = "#ffd0d0" if v > 0 else ("#d0f0d0" if v < 0 else "#ffffff")
+                        fw = "font-weight: bold"
+                        if is_15:
+                            cell_styles.append(f"background-color: {bg}; {fw}")
+                        else:
+                            cell_styles.append(f"background-color: {bg}")
+                    except (ValueError, TypeError):
+                        if is_15:
+                            cell_styles.append(_HL_ROW_STYLE)
+                if not cell_styles:
+                    styles.append("")
+                else:
+                    styles.append("; ".join(s for s in cell_styles if s))
+            return styles
+
+        # Apply styling first (Δ% is still numeric here), then format for display
+        styled = disp_df.style.apply(_style_pivot, axis=1)
+        if "Δ %" in disp_df.columns:
+            styled = styled.format({"Δ %": lambda v: f"{int(v):+}%" if pd.notna(v) else ""})
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
