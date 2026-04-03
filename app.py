@@ -8,8 +8,9 @@ Usage:
     streamlit run app.py
 """
 
+import csv
 import gc
-import io as _io
+import io
 import os
 import glob as glob_module
 
@@ -230,14 +231,12 @@ def load_csv(content: bytes) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
 
     Returns (detail_df, qty_group_df, labels).
     """
-    import io as _io
-
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
         text = content.decode("latin-1")
 
-    raw = pd.read_csv(_io.StringIO(text), sep=";", header=None, dtype=str)
+    raw = pd.read_csv(io.StringIO(text), sep=";", header=None, dtype=str)
 
     # Sentinel values that represent "no content" in a cell read with dtype=str
     _EMPTY = ("", "nan", "none")
@@ -346,14 +345,25 @@ def load_raw_csv(content: bytes) -> pd.DataFrame:
     so peak RAM stays well below the 512 MB service limit even for 50 MB
     inputs.
 
+    Rows where *Number of changes* is missing or non-numeric are counted as
+    1 change (same conservative default used in the pivot-table loader).
+
     Returns a small DataFrame with columns:
         rim, n_changes, n_orderlines, pct_changes, pct_orderlines
     """
-    # Sniff separator from the first 2 KB (no full decode needed)
-    sample = content[:2048].decode("utf-8", errors="replace")
-    sep = ";" if ";" in sample else ("," if "," in sample else "\t")
+    _EMPTY_RESULT = pd.DataFrame(
+        columns=["rim", "n_changes", "n_orderlines", "pct_changes", "pct_orderlines"]
+    )
 
-    buf = _io.BytesIO(content)
+    # Detect separator with csv.Sniffer for reliability
+    sample = content[:4096].decode("utf-8", errors="replace")
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        sep = dialect.delimiter
+    except csv.Error:
+        sep = ","
+
+    buf = io.BytesIO(content)
     header_df = pd.read_csv(buf, sep=sep, nrows=0)
     buf.seek(0)
     cols = header_df.columns.tolist()
@@ -368,8 +378,7 @@ def load_raw_csv(content: bytes) -> pd.DataFrame:
     ) or next((c for c in cols if "change" in c.lower()), None)
 
     if not rim_col or not changes_col:
-        return pd.DataFrame(columns=["rim", "n_changes", "n_orderlines",
-                                     "pct_changes", "pct_orderlines"])
+        return _EMPTY_RESULT
 
     parts: list[pd.DataFrame] = []
     for chunk in pd.read_csv(
@@ -381,6 +390,7 @@ def load_raw_csv(content: bytes) -> pd.DataFrame:
         low_memory=True,
     ):
         chunk = chunk.rename(columns={rim_col: "rim", changes_col: "n_changes"})
+        # Rows without a valid change count are treated as 1 change each
         chunk["n_changes"] = pd.to_numeric(chunk["n_changes"], errors="coerce").fillna(1)
         chunk["rim"] = pd.to_numeric(chunk["rim"], errors="coerce")
         part = (
@@ -394,8 +404,7 @@ def load_raw_csv(content: bytes) -> pd.DataFrame:
     gc.collect()
 
     if not parts:
-        return pd.DataFrame(columns=["rim", "n_changes", "n_orderlines",
-                                     "pct_changes", "pct_orderlines"])
+        return _EMPTY_RESULT
 
     result = (
         pd.concat(parts, ignore_index=True)
@@ -407,13 +416,16 @@ def load_raw_csv(content: bytes) -> pd.DataFrame:
 
     total_changes = result["n_changes"].sum()
     total_orderlines = result["n_orderlines"].sum()
+
     result["pct_changes"] = (
-        (result["n_changes"] / total_changes * 100).round(2) if total_changes else 0.0
+        (result["n_changes"] / total_changes * 100).round(2)
+        if total_changes
+        else pd.Series(0.0, index=result.index)
     )
     result["pct_orderlines"] = (
         (result["n_orderlines"] / total_orderlines * 100).round(2)
         if total_orderlines
-        else 0.0
+        else pd.Series(0.0, index=result.index)
     )
     return result
 
@@ -1436,10 +1448,14 @@ with tabs[3]:
                 tc = df["n_changes"].sum()
                 to = df["n_orderlines"].sum()
                 df["pct_changes"] = (
-                    (df["n_changes"] / tc * 100).round(2) if tc else 0.0
+                    (df["n_changes"] / tc * 100).round(2)
+                    if tc
+                    else pd.Series(0.0, index=df.index)
                 )
                 df["pct_orderlines"] = (
-                    (df["n_orderlines"] / to * 100).round(2) if to else 0.0
+                    (df["n_orderlines"] / to * 100).round(2)
+                    if to
+                    else pd.Series(0.0, index=df.index)
                 )
             return df
 
