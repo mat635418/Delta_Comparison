@@ -12,6 +12,8 @@ A **Streamlit** web application for the comparative analysis of order-rescheduli
 | **Feb vs March** | Grouped bar charts, MoM delta (absolute & %), postponement shift, overlaid daily trend |
 | **Earlier vs Later Date** | Per-rim breakdown of pull-in vs push-out changes, 100% split bars, delta-shift chart Feb→Mar |
 | **Change Intervals** | Quantity-group pivot (Less than 5 / 1-10 / 11-50 / 51-1000 / 101-200 / 201+) by rim, Feb vs Mar + heatmap |
+| **Changes per Orderline** | Excel-style pivot table: changes per orderline item, % to earlier/later date, and full delta comparison Mar vs Feb — all computed directly from the pivot CSV files |
+| **Rim 15 Focus** | All charts and tables highlight **rim = 15"** (gold/amber) as the primary rim of interest |
 | **Global Rim Filter** | Sidebar multi-select narrows every chart to the rims you care about |
 
 ---
@@ -129,6 +131,20 @@ Breaks down changes by confirmed-quantity group across rim sizes:
 - **Per-group grouped bars** — Feb vs Mar for each quantity bucket in a 2-column grid.
 - **Heatmap** — delta count (Mar minus Feb) per qty group x rim, diverging colour scale.
 - Full pivot table (expandable).
+
+### Tab 4 — Changes per Orderline Item
+
+Excel-style pivot table computed directly from `Feb.csv` and `Mar.csv` — **no additional raw files required**:
+
+- **Changes per orderline item** — total rescheduling changes ÷ distinct order lines, per rim.
+- **% to earlier date / % to later date** — share of changes directed to an earlier or later week.
+- **DELTA COMPARISON Mar vs. Feb** — absolute delta in changes per orderline, delta in % (red = more changes / worse, green = fewer / better), and delta in % earlier / later direction.
+- The **rim 15"** row is highlighted in amber throughout.
+
+### Rim 15 Highlight
+
+**Rim 15"** is the current primary target of analysis.  
+It is highlighted with a **gold/amber** background across all bar charts (translucent overlay), heatmaps (column border), and data tables (amber row / column).
 
 ---
 
