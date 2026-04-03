@@ -34,7 +34,7 @@ The application auto-detects the correct block and column names using a fuzzy-ma
 ### Quantity-group block
 
 The right-side pivot (`Grouped confirmed quantity x Rim_Diameter_Inches`) is parsed automatically — no manual mapping needed.  
-Groups recognised: **Less than 5 / 1 to 10 / 11 to 50 / 51 to 1000 / 101 to 200 / 201+**
+Groups recognised: **Less than 5 / 1 to 10 / 11 to 50 / 51 to 100 / 101 to 200 / 201+**
 
 ### Default file names
 
