@@ -92,9 +92,9 @@ POSTPONE_ORDER = [
 ]
 
 QTY_GROUP_ORDER = [
-    # Groups are defined by the SAP pivot-table export; "51 to 1000" and
+    # Groups are defined by the SAP pivot-table export; "51 to 100" and
     # "101 to 200" are separate source segments — not derived here.
-    "Less than 5", "1 to 10", "11 to 50", "51 to 1000", "101 to 200", "201+",
+    "Less than 5", "1 to 10", "11 to 50", "51 to 100", "101 to 200", "201+",
 ]
 
 
